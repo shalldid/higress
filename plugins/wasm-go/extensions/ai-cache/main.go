@@ -29,16 +29,16 @@ const (
 	DefaultCacheKeyPrefix    = "dash-vector-doc-id:"
 )
 
-//func main() {
-//	wrapper.SetCtx(
-//		"ai-cache",
-//		wrapper.ParseConfigBy(parseConfig),
-//		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
-//		wrapper.ProcessRequestBodyBy(onHttpRequestBody),
-//		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
-//		wrapper.ProcessStreamingResponseBodyBy(onHttpResponseBody),
-//	)
-//}
+func main() {
+	wrapper.SetCtx(
+		"ai-cache",
+		wrapper.ParseConfigBy(parseConfig),
+		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+		wrapper.ProcessRequestBodyBy(onHttpRequestBody),
+		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
+		wrapper.ProcessStreamingResponseBodyBy(onHttpResponseBody),
+	)
+}
 
 // @Name ai-cache
 // @Category protocol
@@ -149,13 +149,9 @@ type PluginConfig struct {
 }
 
 type DashScopeEmbeddingRequest struct {
-	Model      string     `json:"model"`
-	Input      Input      `json:"input"`
+	Model      string     `json:"Model"`
+	Input      string     `json:"input"`
 	Parameters Parameters `json:"parameters"`
-}
-
-type Input struct {
-	Texts []string `json:"texts"`
 }
 
 type DashScopeEmbeddingResponse struct {
@@ -290,10 +286,9 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.DashScopeInfo.DashScopeKey == "" {
 		return errors.New("DashScope.DashScopeKey must not by empty")
 	}
-	c.DashScopeInfo.DashScopeClient = wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: c.DashScopeInfo.DashScopeServiceName,
-		Port:        443,
-		Domain:      c.DashScopeInfo.DashScopeDomain,
+	c.DashScopeInfo.DashScopeClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: c.DashScopeInfo.DashScopeServiceName,
+		Port: 35335,
 	})
 
 	// init redis client
@@ -388,7 +383,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		return types.ActionContinue
 	}
 	QueueCache.addQueueQuestion(key)
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(&config, []string{key}, log)
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
@@ -450,7 +445,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 											QueryDocHeader,
 											func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 												log.Infof("Query doc statusCode:%d, doc id:%s", statusCode, NearestResponseBodyFields.LastRequestId)
-												DashVectorLastButOneVector := c(gjson.Get(string(responseBody), "output."+NearestResponseBodyFields.LastRequestId+".vector").Array())
+												DashVectorLastButOneVector := convertGjsonResultArrayToFloatArray(gjson.Get(string(responseBody), "output."+NearestResponseBodyFields.LastRequestId+".vector").Array())
 												log.Infof("Get doc vector success.")
 												CosineDistanceValue := CosineDistance(LastButOneVector, DashVectorLastButOneVector)
 												if CosineDistanceValue <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
@@ -491,15 +486,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 	return types.ActionPause
 }
 
-func main() {
-	varR := " {\"code\":0,\"request_id\":\"4ed66184-89b9-4897-af6c-41ffd870a7a1\",\"message\":\"Success\",\"output\":{\"2230116767763456\":{\"id\":\"2230116767763456\",\"vector\":[0.049763601273298264,-0.02079850062727928,-0.040569599717855453]}}}"
-	vector := c(gjson.Get(varR, "output.2230116767763456.vector").Array())
-	for _, f := range vector {
-		fmt.Println(f)
-	}
-}
-
-func c(r []gjson.Result) []float64 {
+func convertGjsonResultArrayToFloatArray(r []gjson.Result) []float64 {
 	result := make([]float64, len(r))
 	for i, t := range r {
 		result[i] = t.Float()
@@ -695,14 +682,12 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 	return ""
 }
 
-func GenerateTextEmbeddingsRequest(c *PluginConfig, texts []string, log wrapper.Log) (string, []byte, [][2]string) {
-	url := "/api/v1/services/embeddings/text-embedding/text-embedding"
+func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byte, [][2]string) {
+	url := "/api/v1/services/embeddings/text-embedding"
 
 	data := DashScopeEmbeddingRequest{
-		Model: "text-embedding-v2",
-		Input: Input{
-			Texts: texts,
-		},
+		Model: "zpoint",
+		Input: texts,
 		Parameters: Parameters{
 			TextType: "query",
 		},
@@ -715,7 +700,6 @@ func GenerateTextEmbeddingsRequest(c *PluginConfig, texts []string, log wrapper.
 	}
 
 	headers := [][2]string{
-		{"Authorization", "Bearer " + c.DashScopeInfo.DashScopeKey},
 		{"Content-Type", "application/json"},
 	}
 	return url, requestBody, headers
