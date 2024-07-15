@@ -29,16 +29,16 @@ const (
 	DefaultCacheKeyPrefix    = "dash-vector-doc-id:"
 )
 
-func main() {
-	wrapper.SetCtx(
-		"ai-cache",
-		wrapper.ParseConfigBy(parseConfig),
-		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
-		wrapper.ProcessRequestBodyBy(onHttpRequestBody),
-		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
-		wrapper.ProcessStreamingResponseBodyBy(onHttpResponseBody),
-	)
-}
+//func main() {
+//	wrapper.SetCtx(
+//		"ai-cache",
+//		wrapper.ParseConfigBy(parseConfig),
+//		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+//		wrapper.ProcessRequestBodyBy(onHttpRequestBody),
+//		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
+//		wrapper.ProcessStreamingResponseBodyBy(onHttpResponseBody),
+//	)
+//}
 
 // @Name ai-cache
 // @Category protocol
@@ -383,13 +383,14 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		return types.ActionContinue
 	}
 	QueueCache.addQueueQuestion(key)
+	log.Infof("Get the key from request body, key: %s", key)
 	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
 		EmbeddingRequestBody,
 		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-			log.Infof("Request text embedding statusCode:%d.", statusCode)
+			log.Infof("Request text embedding statusCode:%d, key:%s", statusCode, key)
 			if statusCode != 200 {
 				log.Errorf("Failed to fetch embeddings, statusCode: %d, responseBody: %s", statusCode, string(responseBody))
 				// result = nil
@@ -406,10 +407,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 					log.Warnf("Failed to fetch last but_one_vector from cache: %v", err)
 				} else {
 					CosineDistanceValue := CosineDistance(LastButOneVector, EmbeddingVector)
+					DocLastButOneQuestion, _ := QueueCache.getDocLastButOntQuestion()
+					DocLastButOneContent, _ := QueueCache.getDocLastButOntContent()
+					log.Infof("Query similar question from queue cache with last one:%s, score:%f", DocLastButOneQuestion, CosineDistanceValue)
 					if CosineDistanceValue <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
-						DocLastButOneQuestion, _ := QueueCache.getDocLastButOntQuestion()
-						DocLastButOneContent, _ := QueueCache.getDocLastButOntContent()
-						log.Infof("Query similar question from queue cache with last one:%s, score:%f", DocLastButOneQuestion, CosineDistanceValue)
+						QueueCache.copyLastButOneDocIdToLast()
 						if !stream {
 							_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, DocLastButOneContent)), -1)
 						} else {
@@ -434,6 +436,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 							if NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
 								log.Infof("Query similar question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
 								if NearestResponseBodyScore > config.DashVectorInfo.DashVectorNearestScoreMinThreshold {
+									QueueCache.copyLastButOneDocIdToLast()
 									responseCacheResult(ctx, config, NearestResponseBody.Output[0].ID, stream, log)
 									return
 								} else {
@@ -446,10 +449,10 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 											func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 												log.Infof("Query doc statusCode:%d, doc id:%s", statusCode, NearestResponseBodyFields.LastRequestId)
 												DashVectorLastButOneVector := convertGjsonResultArrayToFloatArray(gjson.Get(string(responseBody), "output."+NearestResponseBodyFields.LastRequestId+".vector").Array())
-												log.Infof("Get doc vector success.")
 												CosineDistanceValue := CosineDistance(LastButOneVector, DashVectorLastButOneVector)
 												if CosineDistanceValue <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
 													log.Infof("Query similar last question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
+													QueueCache.copyLastButOneDocIdToLast()
 													responseCacheResult(ctx, config, NearestResponseBody.Output[0].ID, stream, log)
 												} else {
 													insertDocToDashVector(ctx, config, key, EmbeddingVector, log)
