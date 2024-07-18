@@ -104,6 +104,9 @@ type DashVectorInfo struct {
 	DashVectorCollection               string             `require:"true" yaml:"DashVectorCollection" json:"DashVectorCollection"`
 	DashVectorNearestScoreThreshold    float64            `require:"true" yaml:"DashVectorNearestScoreThreshold" json:"DashVectorNearestScoreThreshold"`
 	DashVectorNearestScoreMinThreshold float64            `require:"true" yaml:"DashVectorNearestScoreMinThreshold" json:"DashVectorNearestScoreMinThreshold"`
+	DashVectorIgnorePrefix             string             `require:"true" yaml:"DashVectorIgnorePrefix" json:"DashVectorIgnorePrefix"`
+	DashVectorMinLengthThreshold       uint8              `require:"true" yaml:"DashVectorMinLengthThreshold" json:"DashVectorMinLengthThreshold"`
+	DashVectorChEnEnhance              bool               `require:"true" yaml:"DashVectorChEnEnhance" json:"DashVectorChEnEnhance"`
 	DashVectorClient                   wrapper.HttpClient `yaml:"-" json:"-"`
 }
 
@@ -212,16 +215,13 @@ type DashVectorSearchResponseOutput struct {
 }
 
 type Queue struct {
-	Size       int
-	MaxSize    int
-	QueueArray [2]QueueElement
+	Size         int
+	MaxSize      int
+	ContentArray [3]string
 }
 
 type QueueElement struct {
 	Question string
-	DocId    uint64
-	Vector   []float64
-	Content  string
 }
 
 func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
@@ -262,6 +262,18 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.DashVectorInfo.DashVectorNearestScoreMinThreshold <= 0 {
 		return errors.New("DashVector.DashVectorNearestScoreMinThreshold must not less than or equal to zero")
 	}
+
+	c.DashVectorInfo.DashVectorIgnorePrefix = json.Get("DashVector.DashVectorIgnorePrefix").String()
+	log.Infof("DashVectorIgnorePrefix:%s", c.DashVectorInfo.DashVectorIgnorePrefix)
+
+	c.DashVectorInfo.DashVectorMinLengthThreshold = uint8(json.Get("DashVector.DashVectorMinLengthThreshold").Uint())
+	log.Infof("DashVectorMinLengthThreshold:%d", c.DashVectorInfo.DashVectorMinLengthThreshold)
+	if c.DashVectorInfo.DashVectorMinLengthThreshold <= 0 {
+		return errors.New("DashVector.DashVectorMinLengthThreshold must not less than or equal to zero")
+	}
+
+	c.DashVectorInfo.DashVectorChEnEnhance = json.Get("DashVector.DashVectorChEnEnhance").Bool()
+	log.Infof("DashVectorChEnEnhance:%t", c.DashVectorInfo.DashVectorChEnEnhance)
 
 	c.DashVectorInfo.DashVectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: c.DashVectorInfo.DashVectorServiceName,
@@ -382,9 +394,20 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		log.Debug("parse key from request body failed")
 		return types.ActionContinue
 	}
-	QueueCache.addQueueQuestion(key)
-	CachedKey, _ := QueueCache.generate()
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(CachedKey, log)
+
+	log.Infof("Receive key:%s.", key)
+
+	isHasIgnorePreFix := strings.HasPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
+
+	if isHasIgnorePreFix {
+		key = strings.TrimPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
+		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
+	} else {
+		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
+		key = QueueCache.generate()
+	}
+
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
@@ -397,7 +420,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 				ctx.SetContext(CacheKeyContextKey, nil)
 				_ = proxywasm.ResumeHttpRequest()
 			} else {
-				log.Infof("Successfully fetched embeddings for key:%s.", CachedKey)
+				log.Infof("Successfully fetched embeddings for key:%s.", key)
 				DashScopeEmbeddingResponseBody, _ := TextEmbeddingsVectorResponse(responseBody, log)
 				// 向量值
 				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
@@ -422,13 +445,13 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 								}
 								return
 							} else {
-								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, threshold:%f. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold)
-								ctx.SetContext(CacheKeyContextKey, CachedKey)
+								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, threshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, NearestResponseBodyFields.OriginQuestion)
+								ctx.SetContext(CacheKeyContextKey, key)
 								_ = proxywasm.ResumeHttpRequest()
 							}
 						} else {
-							log.Infof("Can not query nearest key:%s", CachedKey)
-							ctx.SetContext(CacheKeyContextKey, CachedKey)
+							log.Infof("Can not query nearest key:%s", key)
+							ctx.SetContext(CacheKeyContextKey, key)
 							_ = proxywasm.ResumeHttpRequest()
 						}
 					}, 100000)
@@ -541,7 +564,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 		}
 	}
 	VectorBody := ctx.GetContext(QueryEmbeddingKey).([]float64)
-	log.Infof("vector value:%v", VectorBody)
 	if VectorBody != nil {
 		FieldsBody := Fields{
 			OriginQuestion: key,
@@ -700,10 +722,6 @@ func QueryVectorResponse(responseBody []byte, log wrapper.Log) (*DashVectorSearc
 	return &response, nil
 }
 
-func GetInsertDashVectorDocId(responseBody []byte) uint64 {
-	return uint64(gjson.Get(string(responseBody), "output.0.id").Int())
-}
-
 func zhToUnicode(raw []byte) ([]byte, error) {
 	str, err := strconv.Unquote(strings.Replace(strconv.Quote(string(raw)), `\\u`, `\u`, -1))
 	if err != nil {
@@ -720,35 +738,42 @@ func TrimQuote(source string) string {
 
 func initQueue() Queue {
 	return Queue{
-		MaxSize:    2,
-		QueueArray: [2]QueueElement{},
+		MaxSize:      3,
+		ContentArray: [3]string{},
 	}
 }
 
-func (q *Queue) addQueueQuestion(c string) {
-	v := QueueElement{
-		Question: c,
+func (q *Queue) addQueueQuestion(c string, clear bool) {
+	if clear {
+		q.clear()
 	}
 	if q.Size < q.MaxSize {
-		q.QueueArray[q.Size] = v
+		q.ContentArray[q.Size] = c
 		q.Size++
 	} else {
-		copiedArray := [2]QueueElement{}
-		copy(copiedArray[:], q.QueueArray[1:])
-		copy(q.QueueArray[:], copiedArray[:])
-		q.QueueArray[q.MaxSize-1] = v
+		copiedArray := [2]string{}
+		copy(copiedArray[:], q.ContentArray[1:])
+		copy(q.ContentArray[:], copiedArray[:])
+		q.ContentArray[q.MaxSize-1] = c
 	}
 }
 
-func (q *Queue) generate() (string, error) {
+func (q *Queue) clear() {
+	for i := 0; i < q.Size; i++ {
+		q.ContentArray[i] = ""
+	}
+	q.Size = 0
+}
+
+func (q *Queue) generate() string {
 	if q.Size <= 0 {
-		return "", errors.New("queue size is zero")
+		return ""
 
 	} else {
 		Result := ""
 		for i := 0; i < q.Size; i++ {
-			Result = Result + q.QueueArray[i].Question
+			Result = Result + q.ContentArray[i]
 		}
-		return Result, nil
+		return Result
 	}
 }
