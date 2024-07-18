@@ -268,8 +268,8 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 
 	c.DashVectorInfo.DashVectorMinLengthThreshold = uint8(json.Get("DashVector.DashVectorMinLengthThreshold").Uint())
 	log.Infof("DashVectorMinLengthThreshold:%d", c.DashVectorInfo.DashVectorMinLengthThreshold)
-	if c.DashVectorInfo.DashVectorMinLengthThreshold <= 0 {
-		return errors.New("DashVector.DashVectorMinLengthThreshold must not less than or equal to zero")
+	if c.DashVectorInfo.DashVectorMinLengthThreshold < 0 {
+		return errors.New("DashVector.DashVectorMinLengthThreshold must not less than zero")
 	}
 
 	c.DashVectorInfo.DashVectorChEnEnhance = json.Get("DashVector.DashVectorChEnEnhance").Bool()
@@ -436,7 +436,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 						if len(NearestResponseBody.Output) > 0 {
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
-							if NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
+							if (NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold && NearestResponseBodyScore >= config.DashVectorInfo.DashVectorNearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
 								log.Infof("Query similar question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
 								if !stream {
 									_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
@@ -445,7 +445,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 								}
 								return
 							} else {
-								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, threshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, NearestResponseBodyFields.OriginQuestion)
+								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, maxThreshold:%f, minThreshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, config.DashVectorInfo.DashVectorNearestScoreMinThreshold, NearestResponseBodyFields.OriginQuestion)
 								ctx.SetContext(CacheKeyContextKey, key)
 								_ = proxywasm.ResumeHttpRequest()
 							}
