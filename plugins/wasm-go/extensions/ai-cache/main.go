@@ -217,7 +217,7 @@ type DashVectorSearchResponseOutput struct {
 type Queue struct {
 	Size         int
 	MaxSize      int
-	ContentArray [3]string
+	ContentArray [2]string
 }
 
 type QueueElement struct {
@@ -259,8 +259,8 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 
 	c.DashVectorInfo.DashVectorNearestScoreMinThreshold = json.Get("DashVector.DashVectorNearestScoreMinThreshold").Float() / 100000.0
 	log.Infof("DashVectorNearestScoreMinThreshold:%f", c.DashVectorInfo.DashVectorNearestScoreMinThreshold)
-	if c.DashVectorInfo.DashVectorNearestScoreMinThreshold <= 0 {
-		return errors.New("DashVector.DashVectorNearestScoreMinThreshold must not less than or equal to zero")
+	if c.DashVectorInfo.DashVectorNearestScoreMinThreshold < 0 {
+		return errors.New("DashVector.DashVectorNearestScoreMinThreshold must not less than zero")
 	}
 
 	c.DashVectorInfo.DashVectorIgnorePrefix = json.Get("DashVector.DashVectorIgnorePrefix").String()
@@ -738,8 +738,8 @@ func TrimQuote(source string) string {
 
 func initQueue() Queue {
 	return Queue{
-		MaxSize:      3,
-		ContentArray: [3]string{},
+		MaxSize:      2,
+		ContentArray: [2]string{},
 	}
 }
 
@@ -751,8 +751,8 @@ func (q *Queue) addQueueQuestion(c string, clear bool) {
 		q.ContentArray[q.Size] = c
 		q.Size++
 	} else {
-		copiedArray := [2]string{}
-		copy(copiedArray[:], q.ContentArray[1:])
+		copiedArray := [1]string{}
+		copy(copiedArray[:], q.ContentArray[0:1])
 		copy(q.ContentArray[:], copiedArray[:])
 		q.ContentArray[q.MaxSize-1] = c
 	}
