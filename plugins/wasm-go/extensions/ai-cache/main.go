@@ -17,7 +17,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-var QueueCache = initQueue()
+var QueueCache = Queue{
+	MaxSize:      2,
+	ContentArray: [2]string{},
+}
 
 const (
 	CacheKeyContextKey       = "cacheKey"
@@ -106,6 +109,7 @@ type DashVectorInfo struct {
 	DashVectorNearestScoreMinThreshold float64            `require:"true" yaml:"DashVectorNearestScoreMinThreshold" json:"DashVectorNearestScoreMinThreshold"`
 	DashVectorIgnorePrefix             string             `require:"true" yaml:"DashVectorIgnorePrefix" json:"DashVectorIgnorePrefix"`
 	DashVectorMinLengthThreshold       uint8              `require:"true" yaml:"DashVectorMinLengthThreshold" json:"DashVectorMinLengthThreshold"`
+	DashVectorProperNoun               []string           `require:"true" yaml:"DashVectorProperNoun" json:"DashVectorProperNoun"`
 	DashVectorChEnEnhance              bool               `require:"true" yaml:"DashVectorChEnEnhance" json:"DashVectorChEnEnhance"`
 	DashVectorClient                   wrapper.HttpClient `yaml:"-" json:"-"`
 }
@@ -144,7 +148,8 @@ type PluginConfig struct {
 	ReturnStreamResponseTemplate string `required:"true" yaml:"returnStreamResponseTemplate" json:"returnStreamResponseTemplate"`
 	// @Title zh-CN 缓存的过期时间
 	// @Description zh-CN 单位是秒，默认值为0，即永不过期
-	CacheTTL int `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
+	CacheTTL      int             `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
+	ProperNounSet ProperNounStack `yaml:"-" json:"-"`
 	// @Title zh-CN Redis缓存Key的前缀
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
@@ -220,8 +225,13 @@ type Queue struct {
 	ContentArray [2]string
 }
 
-type QueueElement struct {
-	Question string
+type ProperNounStack struct {
+	Row   uint8
+	Coupe []ProperNounStackEle
+}
+
+type ProperNounStackEle struct {
+	Ele []string
 }
 
 func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
@@ -274,6 +284,25 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 
 	c.DashVectorInfo.DashVectorChEnEnhance = json.Get("DashVector.DashVectorChEnEnhance").Bool()
 	log.Infof("DashVectorChEnEnhance:%t", c.DashVectorInfo.DashVectorChEnEnhance)
+
+	ProperNounArraysStr := json.Get("DashVector.DashVectorProperNoun").Array()
+	c.ProperNounSet = ProperNounStack{
+		Row:   0,
+		Coupe: make([]ProperNounStackEle, len(ProperNounArraysStr)),
+	}
+
+	for _, ArrayStr := range ProperNounArraysStr {
+		ProperNounList := strings.Split(ArrayStr.String(), ",")
+		ProperNounSetEle := ProperNounStackEle{
+			Ele: make([]string, len(ProperNounList)),
+		}
+		for i, ProperNounVar := range ProperNounList {
+			ProperNounSetEle.Ele[i] = ProperNounVar
+		}
+		c.ProperNounSet.Coupe[c.ProperNounSet.Row] = ProperNounSetEle
+		c.ProperNounSet.Row++
+	}
+	log.Infof("DashVectorProperNoun:%s", c.ProperNounSet.print())
 
 	c.DashVectorInfo.DashVectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: c.DashVectorInfo.DashVectorServiceName,
@@ -344,6 +373,7 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.ReturnStreamResponseTemplate == "" {
 		c.ReturnStreamResponseTemplate = `data:{"id":"from-cache","choices":[{"index":0,"delta":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` + "\n\ndata:[DONE]\n\n"
 	}
+
 	c.CacheKeyPrefix = json.Get("cacheKeyPrefix").String()
 	if c.CacheKeyPrefix == "" {
 		c.CacheKeyPrefix = DefaultCacheKeyPrefix
@@ -404,7 +434,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
 	} else {
 		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
-		key = QueueCache.generate()
+		key = QueueCache.generate(&config.ProperNounSet)
 	}
 
 	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
@@ -736,13 +766,6 @@ func TrimQuote(source string) string {
 	return string(Key)
 }
 
-func initQueue() Queue {
-	return Queue{
-		MaxSize:      2,
-		ContentArray: [2]string{},
-	}
-}
-
 func (q *Queue) addQueueQuestion(c string, clear bool) {
 	if clear {
 		q.clear()
@@ -765,15 +788,42 @@ func (q *Queue) clear() {
 	q.Size = 0
 }
 
-func (q *Queue) generate() string {
+func (q *Queue) generate(s *ProperNounStack) string {
 	if q.Size <= 0 {
 		return ""
-
+	} else if q.Size == 1 {
+		return q.ContentArray[0]
 	} else {
+		for _, ProperNounSetEle := range s.Coupe {
+			HitCount := 0
+			HitFirstNoun := ""
+			HitSecondNoun := ""
+			for _, ProperNoun := range ProperNounSetEle.Ele {
+				if strings.Contains(q.ContentArray[0], ProperNoun) {
+					HitCount++
+					HitFirstNoun = ProperNoun
+					continue
+				}
+				if strings.Contains(q.ContentArray[1], ProperNoun) {
+					HitCount++
+					HitSecondNoun = ProperNoun
+					continue
+				}
+			}
+			if HitCount >= 2 {
+				return strings.ReplaceAll(q.ContentArray[0], HitFirstNoun, HitSecondNoun)
+			}
+		}
+
 		Result := ""
 		for i := 0; i < q.Size; i++ {
 			Result = Result + q.ContentArray[i]
 		}
 		return Result
 	}
+}
+
+func (s *ProperNounStack) print() string {
+	Str, _ := json.Marshal(s)
+	return string(Str)
 }
