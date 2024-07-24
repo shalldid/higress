@@ -157,9 +157,13 @@ type PluginConfig struct {
 }
 
 type DashScopeEmbeddingRequest struct {
-	Model      string     `json:"Model"`
-	Input      string     `json:"input"`
+	Model      string     `json:"model"`
+	Input      Texts      `json:"input"`
 	Parameters Parameters `json:"parameters"`
+}
+
+type Texts struct {
+	Texts []string `json:"texts"`
 }
 
 type DashScopeEmbeddingResponse struct {
@@ -169,7 +173,8 @@ type DashScopeEmbeddingResponse struct {
 }
 
 type Parameters struct {
-	TextType string `json:"text_type"`
+	TextType   string `json:"text_type"`
+	OutputType string `json:"output_type"`
 }
 
 type Usage struct {
@@ -437,7 +442,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		key = QueueCache.generate(&config.ProperNounSet)
 	}
 
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(config, key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
@@ -649,14 +654,17 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 	return ""
 }
 
-func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byte, [][2]string) {
-	url := "/api/v1/services/embeddings/text-embedding"
+func GenerateTextEmbeddingsRequest(c PluginConfig, texts string, log wrapper.Log) (string, []byte, [][2]string) {
+	url := "/api/v1/services/embeddings/text-embedding/text-embedding"
 
 	data := DashScopeEmbeddingRequest{
-		Model: "zpoint",
-		Input: texts,
+		Model: "text-embedding-v3",
+		Input: Texts{
+			Texts: []string{texts},
+		},
 		Parameters: Parameters{
-			TextType: "query",
+			TextType:   "query",
+			OutputType: "dense&sparse",
 		},
 	}
 
@@ -668,6 +676,7 @@ func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byt
 
 	headers := [][2]string{
 		{"Content-Type", "application/json"},
+		{"Authorization", "Bearer " + c.DashScopeInfo.DashScopeKey},
 	}
 	return url, requestBody, headers
 }
