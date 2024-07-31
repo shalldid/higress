@@ -7,20 +7,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/go-ego/gse"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
 )
 
-var QueueCache = Queue{
-	MaxSize:      2,
-	ContentArray: [2]string{},
-}
+var QueueCache = initQueue()
+var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+var lastQuery string
 
 const (
 	CacheKeyContextKey       = "cacheKey"
@@ -28,8 +30,10 @@ const (
 	PartialMessageContextKey = "partialMessage"
 	ToolCallsContextKey      = "toolCalls"
 	StreamContextKey         = "stream"
-	DefaultCacheKeyPrefix    = ""
-	QueryEmbeddingKey        = "query-embedding"
+	//DefaultCacheKeyPrefix    = "higress-ai-cache:"
+	DefaultCacheKeyPrefix = ""
+	QueryEmbeddingKey     = "query-embedding"
+	charset               = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
 
 func main() {
@@ -101,17 +105,12 @@ type DashScopeInfo struct {
 }
 
 type DashVectorInfo struct {
-	DashVectorServiceName              string             `require:"true" yaml:"DashVectorServiceName" json:"DashVectorServiceName"`
-	DashVectorDomain                   string             `require:"true" yaml:"DashVectorDomain" json:"DashVectorDomain"`
-	DashVectorKey                      string             `require:"true" yaml:"DashVectorKey" json:"DashVectorKey"`
-	DashVectorCollection               string             `require:"true" yaml:"DashVectorCollection" json:"DashVectorCollection"`
-	DashVectorNearestScoreThreshold    float64            `require:"true" yaml:"DashVectorNearestScoreThreshold" json:"DashVectorNearestScoreThreshold"`
-	DashVectorNearestScoreMinThreshold float64            `require:"true" yaml:"DashVectorNearestScoreMinThreshold" json:"DashVectorNearestScoreMinThreshold"`
-	DashVectorIgnorePrefix             string             `require:"true" yaml:"DashVectorIgnorePrefix" json:"DashVectorIgnorePrefix"`
-	DashVectorMinLengthThreshold       uint8              `require:"true" yaml:"DashVectorMinLengthThreshold" json:"DashVectorMinLengthThreshold"`
-	DashVectorProperNoun               []string           `require:"true" yaml:"DashVectorProperNoun" json:"DashVectorProperNoun"`
-	DashVectorChEnEnhance              bool               `require:"true" yaml:"DashVectorChEnEnhance" json:"DashVectorChEnEnhance"`
-	DashVectorClient                   wrapper.HttpClient `yaml:"-" json:"-"`
+	DashVectorServiceName           string             `require:"true" yaml:"DashVectorServiceName" json:"DashVectorServiceName"`
+	DashVectorDomain                string             `require:"true" yaml:"DashVectorDomain" json:"DashVectorDomain"`
+	DashVectorKey                   string             `require:"true" yaml:"DashVectorKey" json:"DashVectorKey"`
+	DashVectorCollection            string             `require:"true" yaml:"DashVectorCollection" json:"DashVectorCollection"`
+	DashVectorNearestScoreThreshold float64            `require:"true" yaml:"DashVectorNearestScoreThreshold" json:"DashVectorNearestScoreThreshold"`
+	DashVectorClient                wrapper.HttpClient `yaml:"-" json:"-"`
 }
 
 type KVExtractor struct {
@@ -148,18 +147,17 @@ type PluginConfig struct {
 	ReturnStreamResponseTemplate string `required:"true" yaml:"returnStreamResponseTemplate" json:"returnStreamResponseTemplate"`
 	// @Title zh-CN 缓存的过期时间
 	// @Description zh-CN 单位是秒，默认值为0，即永不过期
-	CacheTTL      int             `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
-	ProperNounSet ProperNounStack `yaml:"-" json:"-"`
-	AntonymSet    AntonymStack    `yaml:"-" json:"-"`
+	CacheTTL int `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
 	// @Title zh-CN Redis缓存Key的前缀
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
 	RedisClient    wrapper.RedisClient `yaml:"-" json:"-"`
+	CustomConfig   CustomConfig        `required:"false" yaml:"customConfig" json:"customConfig"`
 }
 
 type DashScopeEmbeddingRequest struct {
-	Model      string     `json:"Model"`
-	Input      string     `json:"input"`
+	Model      string     `json:"model"`
+	Input      Input      `json:"input"`
 	Parameters Parameters `json:"parameters"`
 }
 
@@ -167,6 +165,10 @@ type DashScopeEmbeddingResponse struct {
 	RequestId string                           `json:"request_id"`
 	Usage     Usage                            `json:"usage"`
 	Output    DashScopeEmbeddingResponseOutput `json:"output"`
+}
+
+type Input struct {
+	Texts []string `json:"texts"`
 }
 
 type Parameters struct {
@@ -214,40 +216,29 @@ type Fields struct {
 }
 
 type DashVectorSearchResponseOutput struct {
-	ID     string    `json:"id"`
-	Score  float64   `json:"score"`
-	Fields Fields    `json:"fields"`
-	Vector []float64 `json:"vector"`
+	ID     string  `json:"id"`
+	Score  float64 `json:"score"`
+	Fields Fields  `json:"fields"`
 }
 
 type Queue struct {
-	Size         int
-	MaxSize      int
-	ContentArray [2]string
+	Size       int
+	MaxSize    int
+	QueueArray [3]string
 }
 
-type ProperNounStack struct {
-	Row   uint8
-	Coupe []ProperNounStackEle
-}
-
-type AntonymStack struct {
-	Row   uint8
-	Coupe []AntonymStackEle
-}
-
-type AntonymStackEle struct {
-	Ele []string
-}
-
-type ProperNounStackEle struct {
-	Ele []string
+type CustomConfig struct {
+	PrefixWord string `json:"prefixWord"`
 }
 
 func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 
 	log.Infof("config:%s", json.Raw)
 
+	//init custom config
+	log.Infof("Start to init custom config.")
+	c.CustomConfig.PrefixWord = json.Get("customConfig.prefixWord").String()
+	log.Infof("CustomConfig.PrefixWord:%s", c.CustomConfig.PrefixWord)
 	// init DashVector http client
 	log.Infof("Start to init DashVector's http client.")
 	c.DashVectorInfo.DashVectorKey = json.Get("DashVector.DashVectorKey").String()
@@ -277,62 +268,6 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 		return errors.New("DashVector.DashVectorNearestScoreThreshold must not less than or equal to zero")
 	}
 
-	c.DashVectorInfo.DashVectorNearestScoreMinThreshold = json.Get("DashVector.DashVectorNearestScoreMinThreshold").Float() / 100000.0
-	log.Infof("DashVectorNearestScoreMinThreshold:%f", c.DashVectorInfo.DashVectorNearestScoreMinThreshold)
-	if c.DashVectorInfo.DashVectorNearestScoreMinThreshold < 0 {
-		return errors.New("DashVector.DashVectorNearestScoreMinThreshold must not less than zero")
-	}
-
-	c.DashVectorInfo.DashVectorIgnorePrefix = json.Get("DashVector.DashVectorIgnorePrefix").String()
-	log.Infof("DashVectorIgnorePrefix:%s", c.DashVectorInfo.DashVectorIgnorePrefix)
-
-	c.DashVectorInfo.DashVectorMinLengthThreshold = uint8(json.Get("DashVector.DashVectorMinLengthThreshold").Uint())
-	log.Infof("DashVectorMinLengthThreshold:%d", c.DashVectorInfo.DashVectorMinLengthThreshold)
-	if c.DashVectorInfo.DashVectorMinLengthThreshold < 0 {
-		return errors.New("DashVector.DashVectorMinLengthThreshold must not less than zero")
-	}
-
-	c.DashVectorInfo.DashVectorChEnEnhance = json.Get("DashVector.DashVectorChEnEnhance").Bool()
-	log.Infof("DashVectorChEnEnhance:%t", c.DashVectorInfo.DashVectorChEnEnhance)
-
-	ProperNounArraysStr := json.Get("DashVector.DashVectorProperNoun").Array()
-	c.ProperNounSet = ProperNounStack{
-		Row:   0,
-		Coupe: make([]ProperNounStackEle, len(ProperNounArraysStr)),
-	}
-
-	for _, ArrayStr := range ProperNounArraysStr {
-		ProperNounList := strings.Split(ArrayStr.String(), ",")
-		ProperNounSetEle := ProperNounStackEle{
-			Ele: make([]string, len(ProperNounList)),
-		}
-		for i, ProperNounVar := range ProperNounList {
-			ProperNounSetEle.Ele[i] = ProperNounVar
-		}
-		c.ProperNounSet.Coupe[c.ProperNounSet.Row] = ProperNounSetEle
-		c.ProperNounSet.Row++
-	}
-	log.Infof("DashVectorProperNoun:%s", c.ProperNounSet.print())
-
-	AntonymArraysStr := json.Get("DashVector.DashVectorAntonym").Array()
-	c.AntonymSet = AntonymStack{
-		Row:   0,
-		Coupe: make([]AntonymStackEle, len(AntonymArraysStr)),
-	}
-
-	for _, ArrayStr := range AntonymArraysStr {
-		AntonymList := strings.Split(ArrayStr.String(), ",")
-		AntonymSetEle := AntonymStackEle{
-			Ele: make([]string, len(AntonymList)),
-		}
-		for i, AntonymVar := range AntonymList {
-			AntonymSetEle.Ele[i] = AntonymVar
-		}
-		c.AntonymSet.Coupe[c.AntonymSet.Row] = AntonymSetEle
-		c.AntonymSet.Row++
-	}
-	log.Infof("DashVectorAntonym:%s", c.AntonymSet.print())
-
 	c.DashVectorInfo.DashVectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: c.DashVectorInfo.DashVectorServiceName,
 		Port:        443,
@@ -356,9 +291,10 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.DashScopeInfo.DashScopeKey == "" {
 		return errors.New("DashScope.DashScopeKey must not by empty")
 	}
-	c.DashScopeInfo.DashScopeClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
-		FQDN: c.DashScopeInfo.DashScopeServiceName,
-		Port: 35335,
+	c.DashScopeInfo.DashScopeClient = wrapper.NewClusterClient(wrapper.DnsCluster{
+		ServiceName: c.DashScopeInfo.DashScopeServiceName,
+		Port:        443,
+		Domain:      c.DashScopeInfo.DashScopeDomain,
 	})
 
 	// init redis client
@@ -402,7 +338,6 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.ReturnStreamResponseTemplate == "" {
 		c.ReturnStreamResponseTemplate = `data:{"id":"from-cache","choices":[{"index":0,"delta":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` + "\n\ndata:[DONE]\n\n"
 	}
-
 	c.CacheKeyPrefix = json.Get("cacheKeyPrefix").String()
 	if c.CacheKeyPrefix == "" {
 		c.CacheKeyPrefix = DefaultCacheKeyPrefix
@@ -422,23 +357,27 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log wrapper.Log) types.Action {
+
+	logInfoForSeqNo(ctx, log, "start onHttpRequestHeaders function.")
 	contentType, _ := proxywasm.GetHttpRequestHeader("content-type")
 	// The request does not have a body.
 	if contentType == "" {
 		return types.ActionContinue
 	}
 	if !strings.Contains(contentType, "application/json") {
-		log.Warnf("content is not json, can't process:%s", contentType)
+		logErrorForSeqNo(ctx, log, "content is not json, can't process:%s", contentType)
 		ctx.DontReadRequestBody()
 		return types.ActionContinue
 	}
 	_ = proxywasm.RemoveHttpRequestHeader("Accept-Encoding")
 	// The request has a body and requires delaying the header transmission until a cache miss occurs,
 	// at which point the header should be sent.
+	logInfoForSeqNo(ctx, log, "end onHttpRequestHeaders function.")
 	return types.HeaderStopIteration
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log wrapper.Log) types.Action {
+	logInfoForSeqNo(ctx, log, "start onHttpRequestBody function.")
 	bodyJson := gjson.ParseBytes(body)
 	// TODO: It may be necessary to support stream mode determination for different LLM providers.
 	stream := false
@@ -448,80 +387,77 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 	} else if ctx.GetContext(StreamContextKey) != nil {
 		stream = true
 	}
-	key := TrimQuote(bodyJson.Get(config.CacheKeyFrom.RequestBody).Raw)
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody RequestBody is %s", bodyJson.Get(config.CacheKeyFrom.RequestBody).Raw)
+	//删除固定前缀词并补全
+	key := handleQuery(bodyJson.Get(config.CacheKeyFrom.RequestBody).Raw, config)
 	if key == "" {
-		log.Debug("parse key from request body failed")
+		logInfoForSeqNo(ctx, log, "parse key from request body failed")
 		return types.ActionContinue
 	}
-
-	log.Infof("Receive key:%s.", key)
-
-	isHasIgnorePreFix := strings.HasPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
-
-	if isHasIgnorePreFix {
-		key = strings.TrimPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
-		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
-	} else {
-		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
-		key = QueueCache.generate(&config.ProperNounSet)
-	}
-
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
+	//保存问题
+	lastQuery = key
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody lastQuery is %s", lastQuery)
+	QueueCache.addQueue(key)
+	//CachedKey := config.CacheKeyPrefix + QueueCache.generate()
+	CachedKey := config.CacheKeyPrefix + key
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody CachedKey is %s", CachedKey)
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(&config, []string{CachedKey}, log)
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody EmbeddingUrl is %s", EmbeddingUrl)
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody EmbeddingRequestBody is %s", EmbeddingRequestBody)
+	logInfoForSeqNo(ctx, log, "onHttpRequestBody EmbeddingHeader is %s", EmbeddingHeader)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
 		EmbeddingRequestBody,
 		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+			logInfoForSeqNo(ctx, log, "Request text embedding statusCode:%d.", statusCode)
 			if statusCode != 200 {
-				log.Errorf("Failed to fetch embeddings, statusCode: %d, responseBody: %s", statusCode, string(responseBody))
+				logErrorForSeqNo(ctx, log, "Failed to fetch embeddings, statusCode: %d, responseBody: %s", statusCode, string(responseBody))
 				// result = nil
 				ctx.SetContext(QueryEmbeddingKey, nil)
 				ctx.SetContext(CacheKeyContextKey, nil)
 				_ = proxywasm.ResumeHttpRequest()
 			} else {
-				log.Infof("Successfully fetched embeddings for key:%s.", key)
-				DashScopeEmbeddingResponseBody, _ := TextEmbeddingsVectorResponse(responseBody, log)
+				logInfoForSeqNo(ctx, log, "Successfully fetched embeddings for key:%s", CachedKey)
+				DashScopeEmbeddingResponseBody, _ := TextEmbeddingsVectorResponse(ctx, responseBody, log)
 				// 向量值
 				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
+				logInfoForSeqNo(ctx, log, "EmbeddingVector size:%s", len(EmbeddingVector))
 				ctx.SetContext(QueryEmbeddingKey, EmbeddingVector)
 				// Vector交互
-				VectorUrl, VectorRequestBody, VectorHeader, _ := GenerateQueryNearestVectorRequest(config, EmbeddingVector, log)
+				VectorUrl, VectorRequestBody, VectorHeader, _ := GenerateQueryNearestVectorRequest(ctx, config, EmbeddingVector, log)
 				QueryNearestErr := config.DashVectorInfo.DashVectorClient.Post(
 					VectorUrl,
 					VectorHeader,
 					VectorRequestBody,
 					func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-						NearestResponseBody, _ := QueryVectorResponse(responseBody, log)
+						logInfoForSeqNo(ctx, log, "Query nearest vector statusCode:%d, responseBody:%s", statusCode, string(responseBody))
+						NearestResponseBody, _ := QueryNearestVectorResponse(ctx, responseBody, log)
 						if len(NearestResponseBody.Output) > 0 {
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
+							logInfoForSeqNo(ctx, log, "Query similar score:%f", NearestResponseBodyScore)
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
-							if (NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold && NearestResponseBodyScore >= config.DashVectorInfo.DashVectorNearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
-								if isDiffWithAntonymSet(config.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
-									log.Infof("Origin question has antonym with key, origin:%s, key:%s.", NearestResponseBodyFields.OriginQuestion, key)
-									ctx.SetContext(CacheKeyContextKey, key)
-									_ = proxywasm.ResumeHttpRequest()
+							if NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold {
+								logInfoForSeqNo(ctx, log, "Query similar key:%s", NearestResponseBodyFields.OriginQuestion)
+								if !stream {
+									_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
 								} else {
-									log.Infof("Query similar question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
-									if !stream {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
-									} else {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, NearestResponseBodyFields.Content)), -1)
-									}
-									return
+									_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, NearestResponseBodyFields.Content)), -1)
 								}
+								return
 							} else {
-								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, maxThreshold:%f, minThreshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, config.DashVectorInfo.DashVectorNearestScoreMinThreshold, NearestResponseBodyFields.OriginQuestion)
+								logInfoForSeqNo(ctx, log, "Query similar key, but the score of result is larger than the threshold, score:%f, threshold:%f. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold)
 								ctx.SetContext(CacheKeyContextKey, key)
 								_ = proxywasm.ResumeHttpRequest()
 							}
 						} else {
-							log.Infof("Can not query nearest key:%s", key)
+							logInfoForSeqNo(ctx, log, "Can not query nearest key:%s", CachedKey)
 							ctx.SetContext(CacheKeyContextKey, key)
 							_ = proxywasm.ResumeHttpRequest()
 						}
 					}, 100000)
 				if QueryNearestErr != nil {
-					log.Errorf("Query nearest vector error: %v", QueryNearestErr)
+					logErrorForSeqNo(ctx, log, "Query nearest vector error: %v", QueryNearestErr)
 					_ = proxywasm.ResumeHttpRequest()
 					return
 				}
@@ -531,18 +467,25 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		log.Errorf("Embedding text error: %v", EmbeddingErr)
 		_ = proxywasm.ResumeHttpRequest()
 	}
+	//if err != nil {
+	//	log.Error("redis access failed")
+	//	return types.ActionContinue
+	//}
 	return types.ActionPause
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log wrapper.Log) types.Action {
+	logInfoForSeqNo(ctx, log, "start onHttpResponseHeaders function.")
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 	if strings.Contains(contentType, "text/event-stream") {
 		ctx.SetContext(StreamContextKey, struct{}{})
 	}
+	logInfoForSeqNo(ctx, log, "end onHttpResponseHeaders function.")
 	return types.ActionContinue
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []byte, isLastChunk bool, log wrapper.Log) []byte {
+	logInfoForSeqNo(ctx, log, "start onHttpResponseBody function.")
 	if ctx.GetContext(ToolCallsContextKey) != nil {
 		// we should not cache tool call result
 		return chunk
@@ -601,7 +544,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 
 		value = TrimQuote(bodyJson.Get(config.CacheValueFrom.ResponseBody).Raw)
 		if value == "" {
-			log.Warnf("parse value from response body failded, body:%s", body)
+			logErrorForSeqNo(ctx, log, "parse value from response body failded, body:%s", body)
 			return chunk
 		}
 	} else {
@@ -614,7 +557,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 				lastMessage = chunk
 			}
 			if !strings.HasSuffix(string(lastMessage), "\n\n") {
-				log.Warnf("invalid lastMessage:%s", lastMessage)
+				logErrorForSeqNo(ctx, log, "invalid lastMessage:%s", lastMessage)
 				return chunk
 			}
 			// remove the last \n\n
@@ -628,24 +571,27 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 			value = tempContentI.(string)
 		}
 	}
+
 	VectorBody := ctx.GetContext(QueryEmbeddingKey).([]float64)
 	if VectorBody != nil {
 		FieldsBody := Fields{
 			OriginQuestion: key,
 			Content:        value,
 		}
-		InsertVectorUrl, InsertVectorBody, InsertVectorHeader, _ := GenerateInsertDocumentsRequest(config, FieldsBody, VectorBody, log)
-		log.Infof("insert doc key:%s, content:%s.", key, value)
+		InsertVectorUrl, InsertVectorBody, InsertVectorHeader, _ := GenerateInsertDocumentsRequest(ctx, config, FieldsBody, VectorBody, log)
+		logInfoForSeqNo(ctx, log, " GenerateInsertDocumentsRequest InsertVectorUrl is %s.", InsertVectorUrl)
+		logInfoForSeqNo(ctx, log, " GenerateInsertDocumentsRequest InsertVectorBody is %s.", InsertVectorBody)
+		logInfoForSeqNo(ctx, log, " GenerateInsertDocumentsRequest InsertVectorHeader is %s.", InsertVectorHeader)
 		_ = config.DashVectorInfo.DashVectorClient.Post(
 			InsertVectorUrl,
 			InsertVectorHeader,
 			InsertVectorBody,
 			func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-				log.Infof("Insert vector statusCode:%d.", statusCode)
+				log.Infof("Insert vector statusCode:%d, responseBody:%s", statusCode, string(responseBody))
 			},
 			100000)
 	}
-
+	logInfoForSeqNo(ctx, log, "end onHttpResponseBody function.")
 	return chunk
 }
 
@@ -659,7 +605,7 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 		}
 	}
 	if len(message) < 6 {
-		log.Errorf("invalid message:%s", message)
+		logErrorForSeqNo(ctx, log, "invalid message:%s", message)
 		return ""
 	}
 	// skip the prefix "data:"
@@ -680,16 +626,20 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 		ctx.SetContext(ToolCallsContextKey, struct{}{})
 		return ""
 	}
-	log.Debugf("unknown message:%s", bodyJson)
+	logInfoForSeqNo(ctx, log, "unknown message:%s", bodyJson)
 	return ""
 }
 
-func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byte, [][2]string) {
-	url := "/api/v1/services/embeddings/text-embedding"
+func GenerateTextEmbeddingsRequest(c *PluginConfig, texts []string, log wrapper.Log) (string, []byte, [][2]string) {
+	url := "/api/v1/services/embeddings/text-embedding/text-embedding"
 
+	//TODO:  需向量化的问题字符串需要判断是否需要添加上下文内容
+	//
 	data := DashScopeEmbeddingRequest{
-		Model: "zpoint",
-		Input: texts,
+		Model: "text-embedding-v2",
+		Input: Input{
+			Texts: texts,
+		},
 		Parameters: Parameters{
 			TextType: "query",
 		},
@@ -702,12 +652,13 @@ func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byt
 	}
 
 	headers := [][2]string{
+		{"Authorization", "Bearer " + c.DashScopeInfo.DashScopeKey},
 		{"Content-Type", "application/json"},
 	}
 	return url, requestBody, headers
 }
 
-func GenerateInsertDocumentsRequest(c PluginConfig, fields Fields, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
+func GenerateInsertDocumentsRequest(ctx wrapper.HttpContext, c PluginConfig, fields Fields, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
 	url := fmt.Sprintf("/v1/collections/%s/docs", c.DashVectorInfo.DashVectorCollection)
 
 	DocumentsObject := Documents{
@@ -721,7 +672,7 @@ func GenerateInsertDocumentsRequest(c PluginConfig, fields Fields, vector []floa
 
 	requestBody, err := json.Marshal(requestData)
 	if err != nil {
-		log.Errorf("Marshal json error:%s, data:%s.", err, requestData)
+		logErrorForSeqNo(ctx, log, "Marshal json error:%s, data:%s.", err, requestData)
 		return "", nil, nil, err
 	}
 
@@ -733,18 +684,18 @@ func GenerateInsertDocumentsRequest(c PluginConfig, fields Fields, vector []floa
 	return url, requestBody, header, nil
 }
 
-func GenerateQueryNearestVectorRequest(c PluginConfig, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
+func GenerateQueryNearestVectorRequest(ctx wrapper.HttpContext, c PluginConfig, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
 	url := fmt.Sprintf("/v1/collections/%s/query", c.DashVectorInfo.DashVectorCollection)
 
 	requestData := DashVectorSearchRequest{
 		Vector:        vector,
 		TopK:          1,
-		IncludeVector: true,
+		IncludeVector: false,
 	}
 
 	requestBody, err := json.Marshal(requestData)
 	if err != nil {
-		log.Errorf("Marshal json error:%s, data:%s.", err, requestData)
+		logErrorForSeqNo(ctx, log, "Marshal json error:%s, data:%s.", err, requestData)
 		return "", nil, nil, err
 	}
 
@@ -756,32 +707,21 @@ func GenerateQueryNearestVectorRequest(c PluginConfig, vector []float64, log wra
 	return url, requestBody, header, nil
 }
 
-func GenerateQueryVectorByIdRequest(c PluginConfig, id uint64) (string, [][2]string) {
-	url := fmt.Sprintf("/v1/collections/%s/docs?ids=%d", c.DashVectorInfo.DashVectorCollection, id)
-
-	header := [][2]string{
-		{"Content-Type", "application/json"},
-		{"dashvector-auth-token", c.DashVectorInfo.DashVectorKey},
-	}
-
-	return url, header
-}
-
-func TextEmbeddingsVectorResponse(responseBody []byte, log wrapper.Log) (*DashScopeEmbeddingResponse, error) {
+func TextEmbeddingsVectorResponse(ctx wrapper.HttpContext, responseBody []byte, log wrapper.Log) (*DashScopeEmbeddingResponse, error) {
 	var response DashScopeEmbeddingResponse
 	err := json.Unmarshal(responseBody, &response)
 	if err != nil {
-		log.Errorf("[TextEmbeddingsVectorResponse] Unmarshal json error:%s, response:%s.", err, string(responseBody))
+		logErrorForSeqNo(ctx, log, "[TextEmbeddingsVectorResponse] Unmarshal json error:%s, response:%s.", err, string(responseBody))
 		return nil, err
 	}
 	return &response, nil
 }
 
-func QueryVectorResponse(responseBody []byte, log wrapper.Log) (*DashVectorSearchResponse, error) {
+func QueryNearestVectorResponse(ctx wrapper.HttpContext, responseBody []byte, log wrapper.Log) (*DashVectorSearchResponse, error) {
 	var response DashVectorSearchResponse
 	err := json.Unmarshal(responseBody, &response)
 	if err != nil {
-		log.Errorf("[QueryNearestVectorResponse]Unmarshal json error:%s, response:%s.", err, string(responseBody))
+		logErrorForSeqNo(ctx, log, "[QueryNearestVectorResponse]Unmarshal json error:%s, response:%s.", err, string(responseBody))
 		return nil, err
 	}
 	return &response, nil
@@ -801,114 +741,198 @@ func TrimQuote(source string) string {
 	return string(Key)
 }
 
-func (q *Queue) addQueueQuestion(c string, clear bool) {
-	if clear {
-		q.clear()
+func handleQuery(source string, config PluginConfig) string {
+	TempKey := strings.Trim(source, `"`)
+	Key, _ := zhToUnicode([]byte(TempKey))
+	//以固定词开头的则为多轮对话中的第一次
+	if strings.HasPrefix(string(Key), config.CustomConfig.PrefixWord) {
+		return strings.TrimPrefix(string(Key), config.CustomConfig.PrefixWord)
 	}
+	return completionWordByGse(lastQuery, (string(Key)))
+}
+
+func initQueue() (queue *Queue) {
+	queue = &Queue{
+		MaxSize:    3,
+		QueueArray: [3]string{},
+	}
+	return queue
+}
+
+func (q *Queue) addQueue(v string) {
+
 	if q.Size < q.MaxSize {
-		q.ContentArray[q.Size] = c
-		q.Size++
+		q.QueueArray[q.Size] = v
 	} else {
-		copiedArray := [1]string{}
-		copy(copiedArray[:], q.ContentArray[0:1])
-		copy(q.ContentArray[:], copiedArray[:])
-		q.ContentArray[q.MaxSize-1] = c
+		copiedArray := [2]string{}
+		copy(copiedArray[:], q.QueueArray[1:])
+		copy(q.QueueArray[:], copiedArray[:])
+		q.QueueArray[q.MaxSize-1] = v
 	}
+	q.Size++
 }
 
-func (q *Queue) clear() {
-	for i := 0; i < q.Size; i++ {
-		q.ContentArray[i] = ""
-	}
-	q.Size = 0
-}
-
-func (q *Queue) generate(s *ProperNounStack) string {
-	if q.Size <= 0 {
-		return ""
-	} else if q.Size == 1 {
-		return q.ContentArray[0]
-	} else {
-		for _, ProperNounSetEle := range s.Coupe {
-			HitCount := 0
-			HitFirstNoun := ""
-			HitSecondNoun := ""
-			for _, ProperNoun := range ProperNounSetEle.Ele {
-				if strings.Contains(q.ContentArray[0], ProperNoun) {
-					HitCount++
-					HitFirstNoun = ProperNoun
-					continue
-				}
-				if strings.Contains(q.ContentArray[1], ProperNoun) {
-					HitCount++
-					HitSecondNoun = ProperNoun
-					continue
-				}
-			}
-			if HitCount >= 2 {
-				return strings.ReplaceAll(q.ContentArray[0], HitFirstNoun, HitSecondNoun)
-			}
-		}
-
-		Result := ""
-		for i := 0; i < q.Size; i++ {
-			Result = Result + q.ContentArray[i]
-		}
-		return Result
-	}
-}
-
-func isDiffWithAntonymSet(a AntonymStack, s1, s2 string) bool {
-	diff1, diff2 := getDiff(s1, s2)
-	for _, AntonymSetEle := range a.Coupe {
-		HitCount := 0
-		for _, Antonym := range AntonymSetEle.Ele {
-			if Antonym == diff1 {
-				HitCount++
-			}
-			if Antonym == diff2 {
-				HitCount++
-			}
-		}
-		if HitCount >= 2 {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *ProperNounStack) print() string {
-	Str, _ := json.Marshal(s)
-	return string(Str)
-}
-
-func (s *AntonymStack) print() string {
-	Str, _ := json.Marshal(s)
-	return string(Str)
-}
-
-func getDiff(s1, s2 string) (string, string) {
-	rs1 := []rune(s1)
-	rs2 := []rune(s2)
-	var diffS1 string
-	var diffS2 string
-	for i := 0; i < len(rs1)-1; i++ {
-		if i >= len(rs2) || rs2[i] != rs1[i] {
-			diffS1 = string(rs1[i:])
-			diffS2 = string(rs2[i:])
+func (q *Queue) generate() string {
+	Result := ""
+	for i := 0; i < 3; i++ {
+		Ele := q.QueueArray[i]
+		if Ele != "" {
+			Result += q.QueueArray[i]
+		} else {
 			break
 		}
+		Result += " "
 	}
-	rs3 := []rune(diffS1)
-	rs4 := []rune(diffS2)
-	var diffS3 string
-	var diffS4 string
-	for i := 1; i <= len(rs3); i++ {
-		if len(rs4) < i || rs3[len(rs3)-i] != rs4[len(rs4)-i] {
-			diffS3 = string(rs3[:len(rs3)-i+1])
-			diffS4 = string(rs4[:len(rs4)-i+1])
-			break
+	return Result
+}
+
+func generateRandomString(length int) string {
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+	return string(b)
+}
+
+func logInfoForSeqNo(ctx wrapper.HttpContext, log wrapper.Log, format string, args ...interface{}) {
+	seqNo := ctx.GetContext("seqNo")
+	if seqNo == nil || seqNo == "" {
+		seqNo = generateRandomString(16)
+		ctx.SetContext("seqNo", seqNo)
+	}
+	log.Infof("seqNo: %s | "+format, seqNo, args)
+}
+func logErrorForSeqNo(ctx wrapper.HttpContext, log wrapper.Log, format string, args ...interface{}) {
+	seqNo := ctx.GetContext("seqNo")
+	if seqNo == nil || seqNo == "" {
+		seqNo = generateRandomString(16)
+		ctx.SetContext("seqNo", seqNo)
+	}
+	log.Errorf("seqNo: %s | "+format, seqNo, args)
+}
+
+var (
+	seg gse.Segmenter
+)
+
+func completionWordByGse(firstQuestion string, secondQuestion string) string {
+	if "" == firstQuestion {
+		return secondQuestion
+	}
+	seg.LoadDict()
+	seg.AddToken("控制台", 10000, "nz")
+	seg.ReAddToken("控制台", 10000, "nz")
+
+	// 对第一个问题进行分词和词性标注
+	// 第一个问题
+	firstWords := seg.Segment([]byte(firstQuestion))
+	for _, seg := range firstWords {
+		fmt.Printf("%s/ %s,", seg.Token().Text(), seg.Token().Pos())
+	}
+	fmt.Println()
+	// 对第二个问题进行分词和词性标注
+	// 第二个问题
+	secondWords := seg.Segment([]byte(secondQuestion))
+
+	for _, seg := range secondWords {
+		fmt.Printf("%s/ %s,", seg.Token().Text(), seg.Token().Pos())
+	}
+	fmt.Println()
+	firstNouns := extractNounsGse(firstWords)
+	secondNouns := extractNounsGse(secondWords)
+
+	// 替换问题中的动词
+	firstV := extractVerbGse(firstWords)
+	secondV := extractVerbGse(secondWords)
+	var completedQuestion string
+	// 替换第一个问题中的第一个名词为第二个问题中的名词
+	if len(firstNouns) > 0 && len(secondNouns) > 0 {
+		completedQuestion = strings.Replace(firstQuestion, firstNouns[0], secondNouns[0], 1)
+	}
+
+	// 替换第一个问题中的第一个名词为第二个问题中的动词
+	if len(firstV) > 0 && len(secondV) > 0 {
+		completedQuestion = strings.Replace(firstQuestion, firstV[0], secondV[0], 1)
+	}
+	return completedQuestion
+}
+
+// extractNouns 提取名词
+func extractNounsGse(words []gse.Segment) []string {
+	nouns := []string{}
+	for _, word := range words {
+		if word.Token().Pos() == "n" { // 名词
+			nouns = append(nouns, word.Token().Text())
 		}
 	}
-	return strings.Trim(diffS3, " "), strings.Trim(diffS4, " ")
+	return nouns
 }
+
+// extractVerb 提取动词
+func extractVerbGse(words []gse.Segment) []string {
+	verbs := []string{}
+	for _, word := range words {
+		if word.Token().Pos() == "v" { // 动词
+			verbs = append(verbs, word.Token().Text())
+		}
+	}
+	return verbs
+}
+
+// 上下文问题补全
+// func completionWord(firstQuestion string, secondQuestion string) string {
+// 	if "" == firstQuestion {
+// 		return secondQuestion
+// 	}
+// 	x := gojieba.NewJieba()
+// 	x.AddWordEx("控制台", 1000, "n")
+// 	defer x.Free()
+
+// 	// 对第一个问题进行分词和词性标注
+// 	firstWords := x.Tag(firstQuestion)
+
+// 	// 对第二个问题进行分词和词性标注
+// 	secondWords := x.Tag(secondQuestion)
+
+// 	// 替换问题中的名词
+// 	firstNouns := extractNouns(firstWords)
+// 	secondNouns := extractNouns(secondWords)
+
+// 	var completedQuestion string
+// 	// 替换第一个问题中的第一个名词为第二个问题中的名词
+// 	if len(firstNouns) > 0 && len(secondNouns) > 0 {
+// 		completedQuestion = strings.Replace(firstQuestion, firstNouns[0], secondNouns[0], 1)
+// 	}
+
+// 	// 替换问题中的动词
+// 	firstV := extractVerb(firstWords)
+// 	secondV := extractVerb(secondWords)
+// 	// 替换第一个问题中的第一个动词为第二个问题中的动词
+// 	if len(firstV) > 0 && len(secondV) > 0 {
+// 		completedQuestion = strings.Replace(firstQuestion, firstV[0], secondV[0], 1)
+// 	}
+// 	return completedQuestion
+// }
+// extractNouns 提取名词
+// func extractNouns(words []string) []string {
+// 	nouns := []string{}
+// 	for _, word := range words {
+// 		parts := strings.Split(word, "/")
+// 		if len(parts) == 2 && (parts[1] == "n" || parts[1] == "ns") { // 名词
+// 			nouns = append(nouns, parts[0])
+// 		}
+// 	}
+// 	return nouns
+// }
+
+// // extractVerb 提取动词
+// func extractVerb(words []string) []string {
+// 	nouns := []string{}
+// 	for _, word := range words {
+// 		parts := strings.Split(word, "/")
+// 		if len(parts) == 2 && (parts[1] == "v") { // 动词
+// 			nouns = append(nouns, parts[0])
+// 		}
+// 	}
+// 	return nouns
+// }
