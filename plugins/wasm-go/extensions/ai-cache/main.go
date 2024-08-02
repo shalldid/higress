@@ -8,19 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
+	Antonym "ai-cache/types/antonym"
+	ProperNoun "ai-cache/types/proper-noun"
+	ContentHandler "ai-cache/utils"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
 )
-
-var QueueCache = Queue{
-	MaxSize:      2,
-	ContentArray: [2]string{},
-}
 
 const (
 	CacheKeyContextKey       = "cacheKey"
@@ -148,9 +145,9 @@ type PluginConfig struct {
 	ReturnStreamResponseTemplate string `required:"true" yaml:"returnStreamResponseTemplate" json:"returnStreamResponseTemplate"`
 	// @Title zh-CN 缓存的过期时间
 	// @Description zh-CN 单位是秒，默认值为0，即永不过期
-	CacheTTL      int             `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
-	ProperNounSet ProperNounStack `yaml:"-" json:"-"`
-	AntonymSet    AntonymStack    `yaml:"-" json:"-"`
+	CacheTTL      int              `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
+	ProperNounSet ProperNoun.Stack `yaml:"-" json:"-"`
+	AntonymSet    Antonym.Stack    `yaml:"-" json:"-"`
 	// @Title zh-CN Redis缓存Key的前缀
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
@@ -220,30 +217,6 @@ type DashVectorSearchResponseOutput struct {
 	Vector []float64 `json:"vector"`
 }
 
-type Queue struct {
-	Size         int
-	MaxSize      int
-	ContentArray [2]string
-}
-
-type ProperNounStack struct {
-	Row   uint8
-	Coupe []ProperNounStackEle
-}
-
-type AntonymStack struct {
-	Row   uint8
-	Coupe []AntonymStackEle
-}
-
-type AntonymStackEle struct {
-	Ele []string
-}
-
-type ProperNounStackEle struct {
-	Ele []string
-}
-
 func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 
 	log.Infof("config:%s", json.Raw)
@@ -296,42 +269,42 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	log.Infof("DashVectorChEnEnhance:%t", c.DashVectorInfo.DashVectorChEnEnhance)
 
 	ProperNounArraysStr := json.Get("DashVector.DashVectorProperNoun").Array()
-	c.ProperNounSet = ProperNounStack{
-		Row:   0,
-		Coupe: make([]ProperNounStackEle, len(ProperNounArraysStr)),
+	c.ProperNounSet = ProperNoun.Stack{
+		Row:    0,
+		Groups: make([]ProperNoun.Group, len(ProperNounArraysStr)),
 	}
 
 	for _, ArrayStr := range ProperNounArraysStr {
 		ProperNounList := strings.Split(ArrayStr.String(), ",")
-		ProperNounSetEle := ProperNounStackEle{
+		ProperNounSetEle := ProperNoun.Group{
 			Ele: make([]string, len(ProperNounList)),
 		}
 		for i, ProperNounVar := range ProperNounList {
 			ProperNounSetEle.Ele[i] = ProperNounVar
 		}
-		c.ProperNounSet.Coupe[c.ProperNounSet.Row] = ProperNounSetEle
+		c.ProperNounSet.Groups[c.ProperNounSet.Row] = ProperNounSetEle
 		c.ProperNounSet.Row++
 	}
-	log.Infof("DashVectorProperNoun:%s", c.ProperNounSet.print())
+	log.Infof("DashVectorProperNoun:%s", c.ProperNounSet.Print())
 
 	AntonymArraysStr := json.Get("DashVector.DashVectorAntonym").Array()
-	c.AntonymSet = AntonymStack{
-		Row:   0,
-		Coupe: make([]AntonymStackEle, len(AntonymArraysStr)),
+	c.AntonymSet = Antonym.Stack{
+		Row:    0,
+		Groups: make([]Antonym.Group, len(AntonymArraysStr)),
 	}
 
 	for _, ArrayStr := range AntonymArraysStr {
 		AntonymList := strings.Split(ArrayStr.String(), ",")
-		AntonymSetEle := AntonymStackEle{
+		AntonymSetEle := Antonym.Group{
 			Ele: make([]string, len(AntonymList)),
 		}
 		for i, AntonymVar := range AntonymList {
 			AntonymSetEle.Ele[i] = AntonymVar
 		}
-		c.AntonymSet.Coupe[c.AntonymSet.Row] = AntonymSetEle
+		c.AntonymSet.Groups[c.AntonymSet.Row] = AntonymSetEle
 		c.AntonymSet.Row++
 	}
-	log.Infof("DashVectorAntonym:%s", c.AntonymSet.print())
+	log.Infof("DashVectorAntonym:%s", c.AntonymSet.Print())
 
 	c.DashVectorInfo.DashVectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: c.DashVectorInfo.DashVectorServiceName,
@@ -448,23 +421,34 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 	} else if ctx.GetContext(StreamContextKey) != nil {
 		stream = true
 	}
-	key := TrimQuote(bodyJson.Get(config.CacheKeyFrom.RequestBody).Raw)
+
+	SessionKeyArray := bodyJson.Get("messages.@reverse").Array()
+
+	var key string
+	for i, SessionKey := range SessionKeyArray {
+		SessionKeyRole := ContentHandler.TrimQuote(gjson.ParseBytes([]byte(SessionKey.String())).Get("role").Raw)
+		if "user" == SessionKeyRole {
+			SessionKeyContent := ContentHandler.TrimQuote(gjson.ParseBytes([]byte(SessionKey.String())).Get("content").Raw)
+			if i == 0 {
+				key = strings.TrimPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix)
+				if strings.HasPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix) {
+					break
+				}
+			} else {
+				if strings.HasPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix) {
+					key = ContentHandler.Generate(strings.TrimPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix), key, &config.ProperNounSet)
+					break
+				}
+			}
+		}
+	}
+
 	if key == "" {
 		log.Debug("parse key from request body failed")
 		return types.ActionContinue
 	}
 
 	log.Infof("Receive key:%s.", key)
-
-	isHasIgnorePreFix := strings.HasPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
-
-	if isHasIgnorePreFix {
-		key = strings.TrimPrefix(key, config.DashVectorInfo.DashVectorIgnorePrefix)
-		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
-	} else {
-		QueueCache.addQueueQuestion(key, isHasIgnorePreFix)
-		key = QueueCache.generate(&config.ProperNounSet)
-	}
 
 	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
@@ -496,7 +480,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
 							if (NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold && NearestResponseBodyScore >= config.DashVectorInfo.DashVectorNearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
-								if isDiffWithAntonymSet(config.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
+								if ContentHandler.IsDiffWithAntonymSet(config.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
 									log.Infof("Origin question has antonym with key, origin:%s, key:%s.", NearestResponseBodyFields.OriginQuestion, key)
 									ctx.SetContext(CacheKeyContextKey, key)
 									_ = proxywasm.ResumeHttpRequest()
@@ -599,7 +583,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 		}
 		bodyJson := gjson.ParseBytes(body)
 
-		value = TrimQuote(bodyJson.Get(config.CacheValueFrom.ResponseBody).Raw)
+		value = ContentHandler.TrimQuote(bodyJson.Get(config.CacheValueFrom.ResponseBody).Raw)
 		if value == "" {
 			log.Warnf("parse value from response body failded, body:%s", body)
 			return chunk
@@ -667,11 +651,11 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 	if gjson.Get(bodyJson, config.CacheStreamValueFrom.ResponseBody).Exists() {
 		tempContentI := ctx.GetContext(CacheContentContextKey)
 		if tempContentI == nil {
-			content := TrimQuote(gjson.Get(bodyJson, config.CacheStreamValueFrom.ResponseBody).Raw)
+			content := ContentHandler.TrimQuote(gjson.Get(bodyJson, config.CacheStreamValueFrom.ResponseBody).Raw)
 			ctx.SetContext(CacheContentContextKey, content)
 			return content
 		}
-		contentAppend := TrimQuote(gjson.Get(bodyJson, config.CacheStreamValueFrom.ResponseBody).Raw)
+		contentAppend := ContentHandler.TrimQuote(gjson.Get(bodyJson, config.CacheStreamValueFrom.ResponseBody).Raw)
 		content := tempContentI.(string) + contentAppend
 		ctx.SetContext(CacheContentContextKey, content)
 		return content
@@ -756,17 +740,6 @@ func GenerateQueryNearestVectorRequest(c PluginConfig, vector []float64, log wra
 	return url, requestBody, header, nil
 }
 
-func GenerateQueryVectorByIdRequest(c PluginConfig, id uint64) (string, [][2]string) {
-	url := fmt.Sprintf("/v1/collections/%s/docs?ids=%d", c.DashVectorInfo.DashVectorCollection, id)
-
-	header := [][2]string{
-		{"Content-Type", "application/json"},
-		{"dashvector-auth-token", c.DashVectorInfo.DashVectorKey},
-	}
-
-	return url, header
-}
-
 func TextEmbeddingsVectorResponse(responseBody []byte, log wrapper.Log) (*DashScopeEmbeddingResponse, error) {
 	var response DashScopeEmbeddingResponse
 	err := json.Unmarshal(responseBody, &response)
@@ -785,130 +758,4 @@ func QueryVectorResponse(responseBody []byte, log wrapper.Log) (*DashVectorSearc
 		return nil, err
 	}
 	return &response, nil
-}
-
-func zhToUnicode(raw []byte) ([]byte, error) {
-	str, err := strconv.Unquote(strings.Replace(strconv.Quote(string(raw)), `\\u`, `\u`, -1))
-	if err != nil {
-		return nil, err
-	}
-	return []byte(str), nil
-}
-
-func TrimQuote(source string) string {
-	TempKey := strings.Trim(source, `"`)
-	Key, _ := zhToUnicode([]byte(TempKey))
-	return string(Key)
-}
-
-func (q *Queue) addQueueQuestion(c string, clear bool) {
-	if clear {
-		q.clear()
-	}
-	if q.Size < q.MaxSize {
-		q.ContentArray[q.Size] = c
-		q.Size++
-	} else {
-		copiedArray := [1]string{}
-		copy(copiedArray[:], q.ContentArray[0:1])
-		copy(q.ContentArray[:], copiedArray[:])
-		q.ContentArray[q.MaxSize-1] = c
-	}
-}
-
-func (q *Queue) clear() {
-	for i := 0; i < q.Size; i++ {
-		q.ContentArray[i] = ""
-	}
-	q.Size = 0
-}
-
-func (q *Queue) generate(s *ProperNounStack) string {
-	if q.Size <= 0 {
-		return ""
-	} else if q.Size == 1 {
-		return q.ContentArray[0]
-	} else {
-		for _, ProperNounSetEle := range s.Coupe {
-			HitCount := 0
-			HitFirstNoun := ""
-			HitSecondNoun := ""
-			for _, ProperNoun := range ProperNounSetEle.Ele {
-				if strings.Contains(q.ContentArray[0], ProperNoun) {
-					HitCount++
-					HitFirstNoun = ProperNoun
-					continue
-				}
-				if strings.Contains(q.ContentArray[1], ProperNoun) {
-					HitCount++
-					HitSecondNoun = ProperNoun
-					continue
-				}
-			}
-			if HitCount >= 2 {
-				return strings.ReplaceAll(q.ContentArray[0], HitFirstNoun, HitSecondNoun)
-			}
-		}
-
-		Result := ""
-		for i := 0; i < q.Size; i++ {
-			Result = Result + q.ContentArray[i]
-		}
-		return Result
-	}
-}
-
-func isDiffWithAntonymSet(a AntonymStack, s1, s2 string) bool {
-	diff1, diff2 := getDiff(s1, s2)
-	for _, AntonymSetEle := range a.Coupe {
-		HitCount := 0
-		for _, Antonym := range AntonymSetEle.Ele {
-			if Antonym == diff1 {
-				HitCount++
-			}
-			if Antonym == diff2 {
-				HitCount++
-			}
-		}
-		if HitCount >= 2 {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *ProperNounStack) print() string {
-	Str, _ := json.Marshal(s)
-	return string(Str)
-}
-
-func (s *AntonymStack) print() string {
-	Str, _ := json.Marshal(s)
-	return string(Str)
-}
-
-func getDiff(s1, s2 string) (string, string) {
-	rs1 := []rune(s1)
-	rs2 := []rune(s2)
-	var diffS1 string
-	var diffS2 string
-	for i := 0; i < len(rs1)-1; i++ {
-		if i >= len(rs2) || rs2[i] != rs1[i] {
-			diffS1 = string(rs1[i:])
-			diffS2 = string(rs2[i:])
-			break
-		}
-	}
-	rs3 := []rune(diffS1)
-	rs4 := []rune(diffS2)
-	var diffS3 string
-	var diffS4 string
-	for i := 1; i <= len(rs3); i++ {
-		if len(rs4) < i || rs3[len(rs3)-i] != rs4[len(rs4)-i] {
-			diffS3 = string(rs3[:len(rs3)-i+1])
-			diffS4 = string(rs4[:len(rs4)-i+1])
-			break
-		}
-	}
-	return strings.Trim(diffS3, " "), strings.Trim(diffS4, " ")
 }
