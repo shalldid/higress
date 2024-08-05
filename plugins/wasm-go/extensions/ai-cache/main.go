@@ -4,7 +4,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 
 	Antonym "ai-cache/types/antonym"
 	DashScope "ai-cache/types/dashscope"
+	DashVector "ai-cache/types/dashvector"
 	ProperNoun "ai-cache/types/proper-noun"
 	ContentHandler "ai-cache/utils"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
@@ -153,40 +153,6 @@ type PluginConfig struct {
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
 	RedisClient    wrapper.RedisClient `yaml:"-" json:"-"`
-}
-
-type DashVectorInsertRequest struct {
-	Documents []Documents `json:"docs"`
-}
-
-type DashVectorSearchRequest struct {
-	Vector        []float64 `json:"vector"`
-	TopK          int       `json:"topk"`
-	IncludeVector bool      `json:"include_vector"`
-}
-
-type DashVectorSearchResponse struct {
-	Status    int                              `json:"code"`
-	RequestId string                           `json:"request_id"`
-	Message   string                           `json:"message"`
-	Output    []DashVectorSearchResponseOutput `json:"output"`
-}
-
-type Documents struct {
-	Vector []float64 `json:"vector"`
-	Fields Fields    `json:"fields"`
-}
-
-type Fields struct {
-	OriginQuestion string `json:"originQuestion"`
-	Content        string `json:"content"`
-}
-
-type DashVectorSearchResponseOutput struct {
-	ID     string    `json:"id"`
-	Score  float64   `json:"score"`
-	Fields Fields    `json:"fields"`
-	Vector []float64 `json:"vector"`
 }
 
 func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
@@ -441,13 +407,13 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
 				ctx.SetContext(QueryEmbeddingKey, EmbeddingVector)
 				// Vector交互
-				VectorUrl, VectorRequestBody, VectorHeader, _ := GenerateQueryNearestVectorRequest(config, EmbeddingVector, log)
+				VectorUrl, VectorRequestBody, VectorHeader, _ := DashVector.GenerateQueryNearestVectorRequest(config.DashVectorInfo.DashVectorCollection, config.DashVectorInfo.DashVectorKey, EmbeddingVector, log)
 				QueryNearestErr := config.DashVectorInfo.DashVectorClient.Post(
 					VectorUrl,
 					VectorHeader,
 					VectorRequestBody,
 					func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-						NearestResponseBody, _ := QueryVectorResponse(responseBody, log)
+						NearestResponseBody, _ := DashVector.QueryVectorResponse(responseBody, log)
 						if len(NearestResponseBody.Output) > 0 {
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
@@ -586,11 +552,11 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 	}
 	VectorBody := ctx.GetContext(QueryEmbeddingKey).([]float64)
 	if VectorBody != nil {
-		FieldsBody := Fields{
+		FieldsBody := DashVector.Fields{
 			OriginQuestion: key,
 			Content:        value,
 		}
-		InsertVectorUrl, InsertVectorBody, InsertVectorHeader, _ := GenerateInsertDocumentsRequest(config, FieldsBody, VectorBody, log)
+		InsertVectorUrl, InsertVectorBody, InsertVectorHeader, _ := DashVector.GenerateInsertDocumentsRequest(config.DashVectorInfo.DashVectorCollection, config.DashVectorInfo.DashVectorKey, FieldsBody, VectorBody, log)
 		log.Infof("insert doc key:%s, content:%s.", key, value)
 		_ = config.DashVectorInfo.DashVectorClient.Post(
 			InsertVectorUrl,
@@ -638,63 +604,4 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 	}
 	log.Debugf("unknown message:%s", bodyJson)
 	return ""
-}
-
-func GenerateInsertDocumentsRequest(c PluginConfig, fields Fields, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
-	url := fmt.Sprintf("/v1/collections/%s/docs", c.DashVectorInfo.DashVectorCollection)
-
-	DocumentsObject := Documents{
-		Fields: fields,
-		Vector: vector,
-	}
-
-	requestData := DashVectorInsertRequest{
-		Documents: []Documents{DocumentsObject},
-	}
-
-	requestBody, err := json.Marshal(requestData)
-	if err != nil {
-		log.Errorf("Marshal json error:%s, data:%s.", err, requestData)
-		return "", nil, nil, err
-	}
-
-	header := [][2]string{
-		{"Content-Type", "application/json"},
-		{"dashvector-auth-token", c.DashVectorInfo.DashVectorKey},
-	}
-
-	return url, requestBody, header, nil
-}
-
-func GenerateQueryNearestVectorRequest(c PluginConfig, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
-	url := fmt.Sprintf("/v1/collections/%s/query", c.DashVectorInfo.DashVectorCollection)
-
-	requestData := DashVectorSearchRequest{
-		Vector:        vector,
-		TopK:          1,
-		IncludeVector: true,
-	}
-
-	requestBody, err := json.Marshal(requestData)
-	if err != nil {
-		log.Errorf("Marshal json error:%s, data:%s.", err, requestData)
-		return "", nil, nil, err
-	}
-
-	header := [][2]string{
-		{"Content-Type", "application/json"},
-		{"dashvector-auth-token", c.DashVectorInfo.DashVectorKey},
-	}
-
-	return url, requestBody, header, nil
-}
-
-func QueryVectorResponse(responseBody []byte, log wrapper.Log) (*DashVectorSearchResponse, error) {
-	var response DashVectorSearchResponse
-	err := json.Unmarshal(responseBody, &response)
-	if err != nil {
-		log.Errorf("[QueryNearestVectorResponse]Unmarshal json error:%s, response:%s.", err, string(responseBody))
-		return nil, err
-	}
-	return &response, nil
 }
