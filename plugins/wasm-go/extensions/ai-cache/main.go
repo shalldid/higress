@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	Antonym "ai-cache/types/antonym"
+	DashScope "ai-cache/types/dashscope"
 	ProperNoun "ai-cache/types/proper-noun"
 	ContentHandler "ai-cache/utils"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
@@ -152,35 +153,6 @@ type PluginConfig struct {
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
 	RedisClient    wrapper.RedisClient `yaml:"-" json:"-"`
-}
-
-type DashScopeEmbeddingRequest struct {
-	Model      string     `json:"Model"`
-	Input      string     `json:"input"`
-	Parameters Parameters `json:"parameters"`
-}
-
-type DashScopeEmbeddingResponse struct {
-	RequestId string                           `json:"request_id"`
-	Usage     Usage                            `json:"usage"`
-	Output    DashScopeEmbeddingResponseOutput `json:"output"`
-}
-
-type Parameters struct {
-	TextType string `json:"text_type"`
-}
-
-type Usage struct {
-	TotalTokens int `json:"total_tokens"`
-}
-
-type DashScopeEmbeddingResponseOutput struct {
-	Embeddings []EmbeddingData `json:"embeddings"`
-}
-
-type EmbeddingData struct {
-	Embedding []float64 `json:"embedding"`
-	TextIndex int       `json:"text_index"`
 }
 
 type DashVectorInsertRequest struct {
@@ -450,7 +422,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 
 	log.Infof("Receive key:%s.", key)
 
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := GenerateTextEmbeddingsRequest(key, log)
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := DashScope.GenerateTextEmbeddingsRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
@@ -464,7 +436,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 				_ = proxywasm.ResumeHttpRequest()
 			} else {
 				log.Infof("Successfully fetched embeddings for key:%s.", key)
-				DashScopeEmbeddingResponseBody, _ := TextEmbeddingsVectorResponse(responseBody, log)
+				DashScopeEmbeddingResponseBody, _ := DashScope.TextEmbeddingsVectorResponse(responseBody, log)
 				// 向量值
 				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
 				ctx.SetContext(QueryEmbeddingKey, EmbeddingVector)
@@ -668,29 +640,6 @@ func processSSEMessage(ctx wrapper.HttpContext, config PluginConfig, sseMessage 
 	return ""
 }
 
-func GenerateTextEmbeddingsRequest(texts string, log wrapper.Log) (string, []byte, [][2]string) {
-	url := "/api/v1/services/embeddings/text-embedding"
-
-	data := DashScopeEmbeddingRequest{
-		Model: "zpoint",
-		Input: texts,
-		Parameters: Parameters{
-			TextType: "query",
-		},
-	}
-
-	requestBody, err := json.Marshal(data)
-	if err != nil {
-		log.Errorf("Marshal json error:%s, data:%s.", err, data)
-		return "", nil, nil
-	}
-
-	headers := [][2]string{
-		{"Content-Type", "application/json"},
-	}
-	return url, requestBody, headers
-}
-
 func GenerateInsertDocumentsRequest(c PluginConfig, fields Fields, vector []float64, log wrapper.Log) (string, []byte, [][2]string, error) {
 	url := fmt.Sprintf("/v1/collections/%s/docs", c.DashVectorInfo.DashVectorCollection)
 
@@ -738,16 +687,6 @@ func GenerateQueryNearestVectorRequest(c PluginConfig, vector []float64, log wra
 	}
 
 	return url, requestBody, header, nil
-}
-
-func TextEmbeddingsVectorResponse(responseBody []byte, log wrapper.Log) (*DashScopeEmbeddingResponse, error) {
-	var response DashScopeEmbeddingResponse
-	err := json.Unmarshal(responseBody, &response)
-	if err != nil {
-		log.Errorf("[TextEmbeddingsVectorResponse] Unmarshal json error:%s, response:%s.", err, string(responseBody))
-		return nil, err
-	}
-	return &response, nil
 }
 
 func QueryVectorResponse(responseBody []byte, log wrapper.Log) (*DashVectorSearchResponse, error) {
