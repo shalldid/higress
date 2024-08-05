@@ -73,24 +73,6 @@ func main() {
 //
 // @End
 
-type RedisInfo struct {
-	// @Title zh-CN redis 服务名称
-	// @Description zh-CN 带服务类型的完整 FQDN 名称，例如 my-redis.dns、redis.my-ns.svc.cluster.local
-	ServiceName string `required:"true" yaml:"serviceName" json:"serviceName"`
-	// @Title zh-CN redis 服务端口
-	// @Description zh-CN 默认值为6379
-	ServicePort int `required:"false" yaml:"servicePort" json:"servicePort"`
-	// @Title zh-CN 用户名
-	// @Description zh-CN 登陆 redis 的用户名，非必填
-	Username string `required:"false" yaml:"username" json:"username"`
-	// @Title zh-CN 密码
-	// @Description zh-CN 登陆 redis 的密码，非必填，可以只填密码
-	Password string `required:"false" yaml:"password" json:"password"`
-	// @Title zh-CN 请求超时
-	// @Description zh-CN 请求 redis 的超时时间，单位为毫秒。默认值是1000，即1秒
-	Timeout int `required:"false" yaml:"timeout" json:"timeout"`
-}
-
 type DashScopeInfo struct {
 	DashScopeServiceName string             `require:"true" yaml:"DashScopeServiceName" json:"DashScopeServiceName"`
 	DashScopeDomain      string             `require:"true" yaml:"DashScopeDomain" json:"DashScopeDomain"`
@@ -99,17 +81,20 @@ type DashScopeInfo struct {
 }
 
 type DashVectorInfo struct {
-	DashVectorServiceName              string             `require:"true" yaml:"DashVectorServiceName" json:"DashVectorServiceName"`
-	DashVectorDomain                   string             `require:"true" yaml:"DashVectorDomain" json:"DashVectorDomain"`
-	DashVectorKey                      string             `require:"true" yaml:"DashVectorKey" json:"DashVectorKey"`
-	DashVectorCollection               string             `require:"true" yaml:"DashVectorCollection" json:"DashVectorCollection"`
-	DashVectorNearestScoreThreshold    float64            `require:"true" yaml:"DashVectorNearestScoreThreshold" json:"DashVectorNearestScoreThreshold"`
-	DashVectorNearestScoreMinThreshold float64            `require:"true" yaml:"DashVectorNearestScoreMinThreshold" json:"DashVectorNearestScoreMinThreshold"`
-	DashVectorIgnorePrefix             string             `require:"true" yaml:"DashVectorIgnorePrefix" json:"DashVectorIgnorePrefix"`
-	DashVectorMinLengthThreshold       uint8              `require:"true" yaml:"DashVectorMinLengthThreshold" json:"DashVectorMinLengthThreshold"`
-	DashVectorProperNoun               []string           `require:"true" yaml:"DashVectorProperNoun" json:"DashVectorProperNoun"`
-	DashVectorChEnEnhance              bool               `require:"true" yaml:"DashVectorChEnEnhance" json:"DashVectorChEnEnhance"`
-	DashVectorClient                   wrapper.HttpClient `yaml:"-" json:"-"`
+	DashVectorServiceName string             `require:"true" yaml:"DashVectorServiceName" json:"DashVectorServiceName"`
+	DashVectorDomain      string             `require:"true" yaml:"DashVectorDomain" json:"DashVectorDomain"`
+	DashVectorKey         string             `require:"true" yaml:"DashVectorKey" json:"DashVectorKey"`
+	DashVectorCollection  string             `require:"true" yaml:"DashVectorCollection" json:"DashVectorCollection"`
+	DashVectorClient      wrapper.HttpClient `yaml:"-" json:"-"`
+}
+
+type CacheFilter struct {
+	NearestScoreThreshold    float64
+	NearestScoreMinThreshold float64
+	IgnorePrefix             string
+	MinLengthThreshold       uint8
+	ProperNounSet            ProperNoun.Stack
+	AntonymSet               Antonym.Stack
 }
 
 type KVExtractor struct {
@@ -126,9 +111,9 @@ type PluginConfig struct {
 	// @Title zh-CN 通义千问 地址信息
 	// @Description zh-CN 用于文本Embedding，获取文本向量数据地址
 	DashScopeInfo DashScopeInfo `required:"true" yaml:"dashScopeInfo" json:"dashScopeInfo"`
-	// @Title zh-CN Redis 地址信息
-	// @Description zh-CN 用于存储缓存结果的 Redis 地址
-	RedisInfo RedisInfo `required:"true" yaml:"redis" json:"redis"`
+	// @Title zh-CN 缓存过滤配置
+	// @Description zh-CN 用于过滤从缓存查询返回的模型结果数据
+	CacheFilter CacheFilter `required:"true" yaml:"cacheFilter" json:"cacheFilter"`
 	// @Title zh-CN 缓存 key 的来源
 	// @Description zh-CN 往 redis 里存时，使用的 key 的提取方式
 	CacheKeyFrom KVExtractor `required:"true" yaml:"cacheKeyFrom" json:"cacheKeyFrom"`
@@ -146,9 +131,7 @@ type PluginConfig struct {
 	ReturnStreamResponseTemplate string `required:"true" yaml:"returnStreamResponseTemplate" json:"returnStreamResponseTemplate"`
 	// @Title zh-CN 缓存的过期时间
 	// @Description zh-CN 单位是秒，默认值为0，即永不过期
-	CacheTTL      int              `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
-	ProperNounSet ProperNoun.Stack `yaml:"-" json:"-"`
-	AntonymSet    Antonym.Stack    `yaml:"-" json:"-"`
+	CacheTTL int `required:"false" yaml:"cacheTTL" json:"cacheTTL"`
 	// @Title zh-CN Redis缓存Key的前缀
 	// @Description zh-CN 默认值是"higress-ai-cache:"
 	CacheKeyPrefix string              `required:"false" yaml:"cacheKeyPrefix" json:"cacheKeyPrefix"`
@@ -181,69 +164,6 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.DashVectorInfo.DashVectorCollection == "" {
 		return errors.New("DashVector.DashVectorCollection must not be empty")
 	}
-
-	c.DashVectorInfo.DashVectorNearestScoreThreshold = json.Get("DashVector.DashVectorNearestScoreThreshold").Float() / 100000.0
-	log.Infof("DashVectorNearestScoreThreshold:%f", c.DashVectorInfo.DashVectorNearestScoreThreshold)
-	if c.DashVectorInfo.DashVectorNearestScoreThreshold <= 0 {
-		return errors.New("DashVector.DashVectorNearestScoreThreshold must not less than or equal to zero")
-	}
-
-	c.DashVectorInfo.DashVectorNearestScoreMinThreshold = json.Get("DashVector.DashVectorNearestScoreMinThreshold").Float() / 100000.0
-	log.Infof("DashVectorNearestScoreMinThreshold:%f", c.DashVectorInfo.DashVectorNearestScoreMinThreshold)
-	if c.DashVectorInfo.DashVectorNearestScoreMinThreshold < 0 {
-		return errors.New("DashVector.DashVectorNearestScoreMinThreshold must not less than zero")
-	}
-
-	c.DashVectorInfo.DashVectorIgnorePrefix = json.Get("DashVector.DashVectorIgnorePrefix").String()
-	log.Infof("DashVectorIgnorePrefix:%s", c.DashVectorInfo.DashVectorIgnorePrefix)
-
-	c.DashVectorInfo.DashVectorMinLengthThreshold = uint8(json.Get("DashVector.DashVectorMinLengthThreshold").Uint())
-	log.Infof("DashVectorMinLengthThreshold:%d", c.DashVectorInfo.DashVectorMinLengthThreshold)
-	if c.DashVectorInfo.DashVectorMinLengthThreshold < 0 {
-		return errors.New("DashVector.DashVectorMinLengthThreshold must not less than zero")
-	}
-
-	c.DashVectorInfo.DashVectorChEnEnhance = json.Get("DashVector.DashVectorChEnEnhance").Bool()
-	log.Infof("DashVectorChEnEnhance:%t", c.DashVectorInfo.DashVectorChEnEnhance)
-
-	ProperNounArraysStr := json.Get("DashVector.DashVectorProperNoun").Array()
-	c.ProperNounSet = ProperNoun.Stack{
-		Row:    0,
-		Groups: make([]ProperNoun.Group, len(ProperNounArraysStr)),
-	}
-
-	for _, ArrayStr := range ProperNounArraysStr {
-		ProperNounList := strings.Split(ArrayStr.String(), ",")
-		ProperNounSetEle := ProperNoun.Group{
-			Ele: make([]string, len(ProperNounList)),
-		}
-		for i, ProperNounVar := range ProperNounList {
-			ProperNounSetEle.Ele[i] = ProperNounVar
-		}
-		c.ProperNounSet.Groups[c.ProperNounSet.Row] = ProperNounSetEle
-		c.ProperNounSet.Row++
-	}
-	log.Infof("DashVectorProperNoun:%s", c.ProperNounSet.Print())
-
-	AntonymArraysStr := json.Get("DashVector.DashVectorAntonym").Array()
-	c.AntonymSet = Antonym.Stack{
-		Row:    0,
-		Groups: make([]Antonym.Group, len(AntonymArraysStr)),
-	}
-
-	for _, ArrayStr := range AntonymArraysStr {
-		AntonymList := strings.Split(ArrayStr.String(), ",")
-		AntonymSetEle := Antonym.Group{
-			Ele: make([]string, len(AntonymList)),
-		}
-		for i, AntonymVar := range AntonymList {
-			AntonymSetEle.Ele[i] = AntonymVar
-		}
-		c.AntonymSet.Groups[c.AntonymSet.Row] = AntonymSetEle
-		c.AntonymSet.Row++
-	}
-	log.Infof("DashVectorAntonym:%s", c.AntonymSet.Print())
-
 	c.DashVectorInfo.DashVectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: c.DashVectorInfo.DashVectorServiceName,
 		Port:        443,
@@ -272,27 +192,63 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 		Port: 35335,
 	})
 
-	// init redis client
-	log.Infof("Start to init redis client.")
-	c.RedisInfo.ServiceName = json.Get("redis.serviceName").String()
-	if c.RedisInfo.ServiceName == "" {
-		return errors.New("redis service name must not be empty")
+	// init DashScope cache filter
+	log.Infof("Start to init Cache filter.")
+	c.CacheFilter.NearestScoreThreshold = json.Get("CacheFilter.NearestScoreThreshold").Float() / 100000.0
+	log.Infof("CacheFilter.NearestScoreThreshold:%f", c.CacheFilter.NearestScoreThreshold)
+	if c.CacheFilter.NearestScoreThreshold <= 0 {
+		return errors.New("CacheFilter.NearestScoreThreshold must not less than or equal to zero")
 	}
-	c.RedisInfo.ServicePort = int(json.Get("redis.servicePort").Int())
-	if c.RedisInfo.ServicePort == 0 {
-		if strings.HasSuffix(c.RedisInfo.ServiceName, ".static") {
-			// use default logic port which is 80 for static service
-			c.RedisInfo.ServicePort = 80
-		} else {
-			c.RedisInfo.ServicePort = 6379
+
+	c.CacheFilter.NearestScoreMinThreshold = json.Get("CacheFilter.NearestScoreMinThreshold").Float() / 100000.0
+	log.Infof("CacheFilter.NearestScoreMinThreshold:%f", c.CacheFilter.NearestScoreMinThreshold)
+	if c.CacheFilter.NearestScoreMinThreshold < 0 {
+		return errors.New("CacheFilter.NearestScoreMinThreshold must not less than zero")
+	}
+
+	c.CacheFilter.IgnorePrefix = json.Get("CacheFilter.IgnorePrefix").String()
+	log.Infof("CacheFilter.IgnorePrefix:%s", c.CacheFilter.IgnorePrefix)
+
+	ProperNounArraysStr := json.Get("CacheFilter.ProperNoun").Array()
+	c.CacheFilter.ProperNounSet = ProperNoun.Stack{
+		Row:    0,
+		Groups: make([]ProperNoun.Group, len(ProperNounArraysStr)),
+	}
+
+	for _, ArrayStr := range ProperNounArraysStr {
+		ProperNounList := strings.Split(ArrayStr.String(), ",")
+		ProperNounSetEle := ProperNoun.Group{
+			Ele: make([]string, len(ProperNounList)),
 		}
+		for i, ProperNounVar := range ProperNounList {
+			ProperNounSetEle.Ele[i] = ProperNounVar
+		}
+		c.CacheFilter.ProperNounSet.Groups[c.CacheFilter.ProperNounSet.Row] = ProperNounSetEle
+		c.CacheFilter.ProperNounSet.Row++
 	}
-	c.RedisInfo.Username = json.Get("redis.username").String()
-	c.RedisInfo.Password = json.Get("redis.password").String()
-	c.RedisInfo.Timeout = int(json.Get("redis.timeout").Int())
-	if c.RedisInfo.Timeout == 0 {
-		c.RedisInfo.Timeout = 1000
+	log.Infof("CacheFilter.ProperNoun:%s", c.CacheFilter.ProperNounSet.Print())
+
+	AntonymArraysStr := json.Get("CacheFilter.Antonym").Array()
+	c.CacheFilter.AntonymSet = Antonym.Stack{
+		Row:    0,
+		Groups: make([]Antonym.Group, len(AntonymArraysStr)),
 	}
+
+	for _, ArrayStr := range AntonymArraysStr {
+		AntonymList := strings.Split(ArrayStr.String(), ",")
+		AntonymSetEle := Antonym.Group{
+			Ele: make([]string, len(AntonymList)),
+		}
+		for i, AntonymVar := range AntonymList {
+			AntonymSetEle.Ele[i] = AntonymVar
+		}
+		c.CacheFilter.AntonymSet.Groups[c.CacheFilter.AntonymSet.Row] = AntonymSetEle
+		c.CacheFilter.AntonymSet.Row++
+	}
+	log.Infof("CacheFilter.Antonym:%s", c.CacheFilter.AntonymSet.Print())
+
+	// init other cache
+	log.Infof("Start to init other cache.")
 	c.CacheKeyFrom.RequestBody = json.Get("cacheKeyFrom.requestBody").String()
 	if c.CacheKeyFrom.RequestBody == "" {
 		c.CacheKeyFrom.RequestBody = "messages.@reverse.0.content"
@@ -318,15 +274,6 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	if c.CacheKeyPrefix == "" {
 		c.CacheKeyPrefix = DefaultCacheKeyPrefix
 	}
-	c.RedisClient = wrapper.NewRedisClusterClient(wrapper.FQDNCluster{
-		FQDN: c.RedisInfo.ServiceName,
-		Port: int64(c.RedisInfo.ServicePort),
-	})
-	err := c.RedisClient.Init(c.RedisInfo.Username, c.RedisInfo.Password, int64(c.RedisInfo.Timeout))
-	if err != nil {
-		log.Errorf("Failed to init redis client: %v", err)
-		return err
-	}
 
 	log.Info("Init ai cache's components successfully.")
 	return nil
@@ -349,7 +296,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log wrap
 	return types.HeaderStopIteration
 }
 
-func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log wrapper.Log) types.Action {
+func onHttpRequestBody(ctx wrapper.HttpContext, c PluginConfig, body []byte, log wrapper.Log) types.Action {
 	bodyJson := gjson.ParseBytes(body)
 	// TODO: It may be necessary to support stream mode determination for different LLM providers.
 	stream := false
@@ -368,13 +315,13 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		if "user" == SessionKeyRole {
 			SessionKeyContent := ContentHandler.TrimQuote(gjson.ParseBytes([]byte(SessionKey.String())).Get("content").Raw)
 			if i == 0 {
-				key = strings.TrimPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix)
-				if strings.HasPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix) {
+				key = strings.TrimPrefix(SessionKeyContent, c.CacheFilter.IgnorePrefix)
+				if strings.HasPrefix(SessionKeyContent, c.CacheFilter.IgnorePrefix) {
 					break
 				}
 			} else {
-				if strings.HasPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix) {
-					key = ContentHandler.Generate(strings.TrimPrefix(SessionKeyContent, config.DashVectorInfo.DashVectorIgnorePrefix), key, &config.ProperNounSet)
+				if strings.HasPrefix(SessionKeyContent, c.CacheFilter.IgnorePrefix) {
+					key = ContentHandler.Generate(strings.TrimPrefix(SessionKeyContent, c.CacheFilter.IgnorePrefix), key, &c.CacheFilter.ProperNounSet)
 					break
 				}
 			}
@@ -389,7 +336,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 	log.Infof("Receive key:%s.", key)
 
 	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := DashScope.GenerateTextEmbeddingsRequest(key, log)
-	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
+	EmbeddingErr := c.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
 		EmbeddingRequestBody,
@@ -407,8 +354,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
 				ctx.SetContext(QueryEmbeddingKey, EmbeddingVector)
 				// Vector交互
-				VectorUrl, VectorRequestBody, VectorHeader, _ := DashVector.GenerateQueryNearestVectorRequest(config.DashVectorInfo.DashVectorCollection, config.DashVectorInfo.DashVectorKey, EmbeddingVector, log)
-				QueryNearestErr := config.DashVectorInfo.DashVectorClient.Post(
+				VectorUrl, VectorRequestBody, VectorHeader, _ := DashVector.GenerateQueryNearestVectorRequest(c.DashVectorInfo.DashVectorCollection, c.DashVectorInfo.DashVectorKey, EmbeddingVector, log)
+				QueryNearestErr := c.DashVectorInfo.DashVectorClient.Post(
 					VectorUrl,
 					VectorHeader,
 					VectorRequestBody,
@@ -417,22 +364,22 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 						if len(NearestResponseBody.Output) > 0 {
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
-							if (NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold && NearestResponseBodyScore >= config.DashVectorInfo.DashVectorNearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
-								if ContentHandler.IsDiffWithAntonymSet(config.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
+							if (NearestResponseBodyScore <= c.CacheFilter.NearestScoreThreshold && NearestResponseBodyScore >= c.CacheFilter.NearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
+								if ContentHandler.IsDiffWithAntonymSet(c.CacheFilter.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
 									log.Infof("Origin question has antonym with key, origin:%s, key:%s.", NearestResponseBodyFields.OriginQuestion, key)
 									ctx.SetContext(CacheKeyContextKey, key)
 									_ = proxywasm.ResumeHttpRequest()
 								} else {
 									log.Infof("Query similar question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
 									if !stream {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
+										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(c.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
 									} else {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, NearestResponseBodyFields.Content)), -1)
+										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(c.ReturnStreamResponseTemplate, NearestResponseBodyFields.Content)), -1)
 									}
 									return
 								}
 							} else {
-								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, maxThreshold:%f, minThreshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, config.DashVectorInfo.DashVectorNearestScoreMinThreshold, NearestResponseBodyFields.OriginQuestion)
+								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, maxThreshold:%f, minThreshold:%f, content:%s. ", NearestResponseBodyScore, c.CacheFilter.NearestScoreThreshold, c.CacheFilter.NearestScoreMinThreshold, NearestResponseBodyFields.OriginQuestion)
 								ctx.SetContext(CacheKeyContextKey, key)
 								_ = proxywasm.ResumeHttpRequest()
 							}
