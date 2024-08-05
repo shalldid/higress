@@ -6,13 +6,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	uuid "github.com/satori/go.uuid"
 	"net/http"
 	"strings"
 
 	Antonym "ai-cache/types/antonym"
-	DashScope "ai-cache/types/dashscope"
-	DashVector "ai-cache/types/dashvector"
 	ProperNoun "ai-cache/types/proper-noun"
+	ZyECS "ai-cache/types/zyecs"
 	ContentHandler "ai-cache/utils"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -388,7 +388,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 
 	log.Infof("Receive key:%s.", key)
 
-	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := DashScope.GenerateTextEmbeddingsRequest(key, log)
+	// result = nil
+	ctx.SetContext(QueryEmbeddingKey, nil)
+	ctx.SetContext(CacheKeyContextKey, nil)
+
+	EmbeddingUrl, EmbeddingRequestBody, EmbeddingHeader := ZyECS.GenerateQueryRequest(key, log)
 	EmbeddingErr := config.DashScopeInfo.DashScopeClient.Post(
 		EmbeddingUrl,
 		EmbeddingHeader,
@@ -396,56 +400,29 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 			if statusCode != 200 {
 				log.Errorf("Failed to fetch embeddings, statusCode: %d, responseBody: %s", statusCode, string(responseBody))
-				// result = nil
-				ctx.SetContext(QueryEmbeddingKey, nil)
-				ctx.SetContext(CacheKeyContextKey, nil)
 				_ = proxywasm.ResumeHttpRequest()
 			} else {
-				log.Infof("Successfully fetched embeddings for key:%s.", key)
-				DashScopeEmbeddingResponseBody, _ := DashScope.TextEmbeddingsVectorResponse(responseBody, log)
-				// 向量值
-				EmbeddingVector := DashScopeEmbeddingResponseBody.Output.Embeddings[0].Embedding
-				ctx.SetContext(QueryEmbeddingKey, EmbeddingVector)
-				// Vector交互
-				VectorUrl, VectorRequestBody, VectorHeader, _ := DashVector.GenerateQueryNearestVectorRequest(config.DashVectorInfo.DashVectorCollection, config.DashVectorInfo.DashVectorKey, EmbeddingVector, log)
-				QueryNearestErr := config.DashVectorInfo.DashVectorClient.Post(
-					VectorUrl,
-					VectorHeader,
-					VectorRequestBody,
-					func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-						NearestResponseBody, _ := DashVector.QueryVectorResponse(responseBody, log)
-						if len(NearestResponseBody.Output) > 0 {
-							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
-							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
-							if (NearestResponseBodyScore <= config.DashVectorInfo.DashVectorNearestScoreThreshold && NearestResponseBodyScore >= config.DashVectorInfo.DashVectorNearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
-								if ContentHandler.IsDiffWithAntonymSet(config.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
-									log.Infof("Origin question has antonym with key, origin:%s, key:%s.", NearestResponseBodyFields.OriginQuestion, key)
-									ctx.SetContext(CacheKeyContextKey, key)
-									_ = proxywasm.ResumeHttpRequest()
-								} else {
-									log.Infof("Query similar question:%s, score:%f", NearestResponseBodyFields.OriginQuestion, NearestResponseBodyScore)
-									if !stream {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, NearestResponseBodyFields.Content)), -1)
-									} else {
-										_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, NearestResponseBodyFields.Content)), -1)
-									}
-									return
-								}
-							} else {
-								log.Infof("Query similar key, but the score of result is larger than the threshold, score:%f, maxThreshold:%f, minThreshold:%f, content:%s. ", NearestResponseBodyScore, config.DashVectorInfo.DashVectorNearestScoreThreshold, config.DashVectorInfo.DashVectorNearestScoreMinThreshold, NearestResponseBodyFields.OriginQuestion)
-								ctx.SetContext(CacheKeyContextKey, key)
-								_ = proxywasm.ResumeHttpRequest()
-							}
-						} else {
-							log.Infof("Can not query nearest key:%s", key)
-							ctx.SetContext(CacheKeyContextKey, key)
-							_ = proxywasm.ResumeHttpRequest()
-						}
-					}, 100000)
-				if QueryNearestErr != nil {
-					log.Errorf("Query nearest vector error: %v", QueryNearestErr)
+				ZyECSResponseGson := gjson.ParseBytes(responseBody)
+				Answer := ZyECSResponseGson.Get("output.answer").String()
+				Trace := ZyECSResponseGson.Get("output.answer_trace").String()
+				log.Infof("Successfully query answer embeddings for question:%s, answer: %s, trace: %s.", key, Answer, Trace)
+				if "llm" == Trace {
+					satoriUUID := uuid.NewV4().String()
+					if !stream {
+						_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, satoriUUID, Answer)), -1)
+					} else {
+						_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, satoriUUID, Answer)), -1)
+					}
+				} else if "cache" == Trace {
+					SimilarQuestion := ZyECSResponseGson.Get("output.similary_question").String()
+					log.Infof("Get similar question for question:%s, similar question: %s.", key, SimilarQuestion)
+					if !stream {
+						_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "application/json; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnResponseTemplate, "from-cache", Answer)), -1)
+					} else {
+						_ = proxywasm.SendHttpResponse(200, [][2]string{{"content-type", "text/event-stream; charset=utf-8"}}, []byte(fmt.Sprintf(config.ReturnStreamResponseTemplate, "from-cache", Answer)), -1)
+					}
+				} else {
 					_ = proxywasm.ResumeHttpRequest()
-					return
 				}
 			}
 		}, 10000)
@@ -508,7 +485,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 		return chunk
 	}
 	// last chunk
-	key := keyI.(string)
 	stream := ctx.GetContext(StreamContextKey)
 	var value string
 	if stream == nil {
@@ -550,24 +526,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []by
 			value = tempContentI.(string)
 		}
 	}
-	VectorBody := ctx.GetContext(QueryEmbeddingKey).([]float64)
-	if VectorBody != nil {
-		FieldsBody := DashVector.Fields{
-			OriginQuestion: key,
-			Content:        value,
-		}
-		InsertVectorUrl, InsertVectorBody, InsertVectorHeader, _ := DashVector.GenerateInsertDocumentsRequest(config.DashVectorInfo.DashVectorCollection, config.DashVectorInfo.DashVectorKey, FieldsBody, VectorBody, log)
-		log.Infof("insert doc key:%s, content:%s.", key, value)
-		_ = config.DashVectorInfo.DashVectorClient.Post(
-			InsertVectorUrl,
-			InsertVectorHeader,
-			InsertVectorBody,
-			func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-				log.Infof("Insert vector statusCode:%d.", statusCode)
-			},
-			100000)
-	}
-
 	return chunk
 }
 
