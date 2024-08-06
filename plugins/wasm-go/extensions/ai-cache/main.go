@@ -364,7 +364,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c PluginConfig, body []byte, log
 						if len(NearestResponseBody.Output) > 0 {
 							NearestResponseBodyScore := NearestResponseBody.Output[0].Score
 							NearestResponseBodyFields := NearestResponseBody.Output[0].Fields
-							if (NearestResponseBodyScore <= c.CacheFilter.NearestScoreThreshold && NearestResponseBodyScore >= c.CacheFilter.NearestScoreMinThreshold) || NearestResponseBodyScore == 0 {
+							if (NearestResponseBodyScore <= c.CacheFilter.NearestScoreThreshold && NearestResponseBodyScore >= c.CacheFilter.NearestScoreMinThreshold) || NearestResponseBodyScore <= 0 {
 								if ContentHandler.IsDiffWithAntonymSet(c.CacheFilter.AntonymSet, NearestResponseBodyFields.OriginQuestion, key) {
 									log.Infof("Origin question has antonym with key, origin:%s, key:%s.", NearestResponseBodyFields.OriginQuestion, key)
 									ctx.SetContext(CacheKeyContextKey, key)
