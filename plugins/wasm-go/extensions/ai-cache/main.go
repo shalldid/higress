@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	Antonym "ai-cache/types/antonym"
+	ChToEn "ai-cache/types/ch-to-en"
 	DashScope "ai-cache/types/dashscope"
 	DashVector "ai-cache/types/dashvector"
 	ProperNoun "ai-cache/types/proper-noun"
@@ -95,6 +96,7 @@ type CacheFilter struct {
 	MinLengthThreshold       uint8
 	ProperNounSet            ProperNoun.Stack
 	AntonymSet               Antonym.Stack
+	ChToEnSet                ChToEn.Stack
 }
 
 type KVExtractor struct {
@@ -247,6 +249,23 @@ func parseConfig(json gjson.Result, c *PluginConfig, log wrapper.Log) error {
 	}
 	log.Infof("CacheFilter.Antonym:%s", c.CacheFilter.AntonymSet.Print())
 
+	ChToEnArraysStr := json.Get("CacheFilter.ChToEn").Array()
+	c.CacheFilter.ChToEnSet = ChToEn.Stack{
+		Row:    0,
+		Groups: make([]ChToEn.Group, len(ChToEnArraysStr)),
+	}
+
+	for _, ArrayStr := range ChToEnArraysStr {
+		ChToEnList := strings.Split(ArrayStr.String(), ":")
+		ChToEnSetEle := ChToEn.Group{
+			Ch: ChToEnList[0],
+			En: ChToEnList[1],
+		}
+		c.CacheFilter.ChToEnSet.Groups[c.CacheFilter.ChToEnSet.Row] = ChToEnSetEle
+		c.CacheFilter.ChToEnSet.Row++
+	}
+	log.Infof("CacheFilter.ChToEn:%s", c.CacheFilter.ChToEnSet.Print())
+
 	// init other cache
 	log.Infof("Start to init other cache.")
 	c.CacheKeyFrom.RequestBody = json.Get("cacheKeyFrom.requestBody").String()
@@ -332,6 +351,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c PluginConfig, body []byte, log
 		log.Debug("parse key from request body failed")
 		return types.ActionContinue
 	}
+
+	key = c.CacheFilter.ChToEnSet.Translate(key)
 
 	log.Infof("Receive key:%s.", key)
 
